@@ -1,15 +1,17 @@
-@file:Suppress("UnstableApiUsage")
+import de.mannodermaus.gradle.plugins.junit5.dsl.UnsupportedDeviceBehavior
+import okhttp3.buildsupport.androidBuild
 
 plugins {
+  id("okhttp.base-conventions")
   id("com.android.library")
-  kotlin("android")
   id("de.mannodermaus.android-junit5")
+  id("app.cash.burst")
 }
 
-val androidBuild = property("androidBuild").toString().toBoolean()
-
 android {
-  compileSdk = 35
+  compileSdk {
+    version = release(37)
+  }
 
   namespace = "okhttp.android.test"
 
@@ -40,12 +42,26 @@ android {
   }
 
   testOptions {
-    targetSdk = 34
+    targetSdk = 37
+    unitTests.isIncludeAndroidResources = true
+
+    // Robolectric 4.17 reflects into JDK internals, which JDK 17+ blocks by default.
+    // https://robolectric.org/getting-started/
+    unitTests.all {
+      it.jvmArgs(
+        "--add-opens=java.base/java.lang=ALL-UNNAMED",
+        "--add-opens=java.base/java.util=ALL-UNNAMED",
+        "--add-opens=java.base/java.io=ALL-UNNAMED",
+        "--add-opens=java.base/java.net=ALL-UNNAMED",
+        "--add-opens=java.base/java.security=ALL-UNNAMED",
+        "--add-opens=java.base/java.text=ALL-UNNAMED",
+        "--add-opens=java.base/jdk.internal.access=ALL-UNNAMED",
+        "--add-opens=java.desktop/java.awt.font=ALL-UNNAMED",
+        "--add-opens=jdk.compiler/com.sun.tools.javac.api=ALL-UNNAMED",
+      )
+    }
   }
 
-  kotlinOptions {
-    jvmTarget = JavaVersion.VERSION_11.toString()
-  }
 
   // issue merging due to conflict with httpclient and something else
   packagingOptions.resources.excludes += setOf(
@@ -53,28 +69,31 @@ android {
     "META-INF/LICENSE.md",
     "META-INF/LICENSE-notice.md",
     "README.txt",
-    "org/bouncycastle/LICENSE"
+    "org/bouncycastle/LICENSE",
+    "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
   )
 }
 
 dependencies {
   implementation(libs.kotlin.reflect)
   implementation(libs.playservices.safetynet)
-  implementation(projects.okhttp)
+  "friendsImplementation"(projects.okhttp)
+  "friendsImplementation"(projects.okhttpDnsoverhttps)
 
+  testImplementation(projects.okhttp)
   testImplementation(libs.junit)
   testImplementation(libs.junit.ktx)
   testImplementation(libs.assertk)
   testImplementation(projects.okhttpTls)
-  testImplementation(projects.loggingInterceptor)
+  "friendsTestImplementation"(projects.loggingInterceptor)
   testImplementation(libs.androidx.test.runner)
   testImplementation(libs.robolectric)
   testImplementation(libs.androidx.espresso.core)
-  testImplementation(libs.squareup.okio.fakefilesystem)
+  testImplementation(libs.square.okio.fakefilesystem)
   testImplementation(projects.okhttpTestingSupport)
-  testImplementation(rootProject.libs.conscrypt.openjdk)
-  testImplementation(rootProject.libs.junit.jupiter.engine)
-  testImplementation(rootProject.libs.junit.vintage.engine)
+  testImplementation(libs.conscrypt.openjdk)
+  testImplementation(libs.junit.jupiter.engine)
+  testImplementation(libs.junit.vintage.engine)
 
   androidTestImplementation(projects.okhttpTestingSupport) {
     exclude("org.openjsse", "openjsse")
@@ -83,26 +102,35 @@ dependencies {
   }
   androidTestImplementation(libs.assertk)
   androidTestImplementation(libs.bouncycastle.bcprov)
+  androidTestImplementation(libs.bouncycastle.bcutil)
   androidTestImplementation(libs.bouncycastle.bctls)
   androidTestImplementation(libs.conscrypt.android)
   androidTestImplementation(projects.mockwebserver3Junit4)
   androidTestImplementation(projects.mockwebserver3Junit5)
   androidTestImplementation(projects.okhttpBrotli)
+  androidTestImplementation(projects.okhttpZstd)
   androidTestImplementation(projects.okhttpDnsoverhttps)
   androidTestImplementation(projects.loggingInterceptor)
   androidTestImplementation(projects.okhttpSse)
   androidTestImplementation(projects.okhttpTls)
   androidTestImplementation(libs.androidx.junit)
   androidTestImplementation(libs.androidx.espresso.core)
-  androidTestImplementation(libs.httpClient5)
+  androidTestImplementation(libs.http.client5)
   androidTestImplementation(libs.kotlin.test.common)
   androidTestImplementation(libs.kotlin.test.junit)
-  androidTestImplementation(libs.squareup.moshi)
-  androidTestImplementation(libs.squareup.moshi.kotlin)
-  androidTestImplementation(libs.squareup.okio.fakefilesystem)
+  androidTestImplementation(libs.square.moshi)
+  androidTestImplementation(libs.square.moshi.kotlin)
+  androidTestImplementation(libs.square.okio.fakefilesystem)
 
   androidTestImplementation(libs.androidx.test.runner)
   androidTestImplementation(libs.junit.jupiter.api)
   androidTestImplementation(libs.junit5android.core)
   androidTestRuntimeOnly(libs.junit5android.runner)
+}
+
+junitPlatform {
+  instrumentationTests.behaviorForUnsupportedDevices = UnsupportedDeviceBehavior.Skip
+  filters {
+    excludeTags("Remote")
+  }
 }

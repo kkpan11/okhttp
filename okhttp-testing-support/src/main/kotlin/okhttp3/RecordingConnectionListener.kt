@@ -13,6 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:Suppress(
+  "CANNOT_OVERRIDE_INVISIBLE_MEMBER",
+  "INVISIBLE_MEMBER",
+  "INVISIBLE_REFERENCE",
+)
+
 package okhttp3
 
 import assertk.assertThat
@@ -20,22 +26,22 @@ import assertk.assertions.isCloseTo
 import assertk.assertions.isFalse
 import assertk.assertions.isInstanceOf
 import assertk.assertions.matchesPredicate
-import java.util.Deque
-import java.util.concurrent.ConcurrentLinkedDeque
+import java.util.concurrent.LinkedBlockingQueue
 import java.util.concurrent.TimeUnit
 import okhttp3.ConnectionEvent.NoNewExchanges
+import okhttp3.internal.connection.ConnectionListener
 import okhttp3.internal.connection.RealConnection
 import okio.IOException
 import org.junit.jupiter.api.Assertions
 
-open class RecordingConnectionListener(
+internal open class RecordingConnectionListener(
   /**
    * An override to ignore the normal order that is enforced.
    * EventListeners added by Interceptors will not see all events.
    */
   private val enforceOrder: Boolean = true,
 ) : ConnectionListener() {
-  val eventSequence: Deque<ConnectionEvent> = ConcurrentLinkedDeque()
+  val eventSequence = LinkedBlockingQueue<ConnectionEvent>()
 
   private val forbiddenLocks = mutableSetOf<Any>()
 
@@ -77,7 +83,7 @@ open class RecordingConnectionListener(
     eventClass: Class<out ConnectionEvent>? = null,
     elapsedMs: Long = -1L,
   ): ConnectionEvent {
-    val result = eventSequence.remove()
+    val result = eventSequence.take()
     val actualElapsedNs = result.timestampNs - (lastTimestampNs ?: result.timestampNs)
     lastTimestampNs = result.timestampNs
 
@@ -127,8 +133,12 @@ open class RecordingConnectionListener(
     } else {
       eventSequence.forEach loop@{
         when (e.closes(it)) {
-          null -> return // no open event
-          true -> return // found open event
+          null -> return
+
+          // no open event
+          true -> return
+
+          // found open event
           false -> return@loop // this is not the open event so continue
         }
       }

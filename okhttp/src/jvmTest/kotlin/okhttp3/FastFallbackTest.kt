@@ -30,7 +30,10 @@ import javax.net.SocketFactory
 import kotlin.test.assertFailsWith
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.SocketPolicy.ResetStreamAtStart
+import mockwebserver3.SocketEffect.CloseStream
+import okhttp3.CallEvent.ConnectEnd
+import okhttp3.CallEvent.ConnectFailed
+import okhttp3.CallEvent.ConnectStart
 import okhttp3.internal.http2.ErrorCode
 import okhttp3.testing.Flaky
 import org.junit.jupiter.api.AfterEach
@@ -62,7 +65,7 @@ class FastFallbackTest {
   private lateinit var serverIpv4: MockWebServer
   private lateinit var serverIpv6: MockWebServer
 
-  private val listener = RecordingEventListener()
+  private val eventRecorder = EventRecorder()
   private lateinit var client: OkHttpClient
   private lateinit var url: HttpUrl
 
@@ -95,7 +98,7 @@ class FastFallbackTest {
     client =
       clientTestRule
         .newClientBuilder()
-        .eventListenerFactory(clientTestRule.wrap(listener))
+        .eventListenerFactory(clientTestRule.wrap(eventRecorder))
         .connectTimeout(60, TimeUnit.SECONDS) // Deliberately exacerbate slow fallbacks.
         .dns { dnsResults }
         .fastFallback(true)
@@ -110,8 +113,8 @@ class FastFallbackTest {
 
   @AfterEach
   internal fun tearDown() {
-    serverIpv4.shutdown()
-    serverIpv6.shutdown()
+    serverIpv4.close()
+    serverIpv6.close()
   }
 
   @Test
@@ -133,8 +136,8 @@ class FastFallbackTest {
     assertThat(response.body.string()).isEqualTo("hello from IPv6")
 
     // In the process we made one successful connection attempt.
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectStart" }).hasSize(1)
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectFailed" }).hasSize(0)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectStart::class }).hasSize(1)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectFailed::class }).hasSize(0)
   }
 
   @Test
@@ -157,13 +160,13 @@ class FastFallbackTest {
     assertThat(response.body.string()).isEqualTo("hello from IPv6")
 
     // In the process we made one successful connection attempt.
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectStart" }).hasSize(1)
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectFailed" }).hasSize(0)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectStart::class }).hasSize(1)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectFailed::class }).hasSize(0)
   }
 
   @Test
   fun reachesIpv4WhenIpv6IsDown() {
-    serverIpv6.shutdown()
+    serverIpv6.close()
     serverIpv4.enqueue(
       MockResponse(body = "hello from IPv4"),
     )
@@ -173,14 +176,14 @@ class FastFallbackTest {
     assertThat(response.body.string()).isEqualTo("hello from IPv4")
 
     // In the process we made one successful connection attempt.
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectStart" }).hasSize(2)
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectFailed" }).hasSize(1)
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectEnd" }).hasSize(1)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectStart::class }).hasSize(2)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectFailed::class }).hasSize(1)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectEnd::class }).hasSize(1)
   }
 
   @Test
   fun reachesIpv6WhenIpv4IsDown() {
-    serverIpv4.shutdown()
+    serverIpv4.close()
     serverIpv6.enqueue(
       MockResponse(body = "hello from IPv6"),
     )
@@ -190,15 +193,15 @@ class FastFallbackTest {
     assertThat(response.body.string()).isEqualTo("hello from IPv6")
 
     // In the process we made two connection attempts including one failure.
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectStart" }).hasSize(1)
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectEnd" }).hasSize(1)
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectFailed" }).hasSize(0)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectStart::class }).hasSize(1)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectEnd::class }).hasSize(1)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectFailed::class }).hasSize(0)
   }
 
   @Test
   fun failsWhenBothServersAreDown() {
-    serverIpv4.shutdown()
-    serverIpv6.shutdown()
+    serverIpv4.close()
+    serverIpv6.close()
 
     val call = client.newCall(Request(url))
     assertFailsWith<IOException> {
@@ -206,8 +209,8 @@ class FastFallbackTest {
     }
 
     // In the process we made two unsuccessful connection attempts.
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectStart" }).hasSize(2)
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectFailed" }).hasSize(2)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectStart::class }).hasSize(2)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectFailed::class }).hasSize(2)
   }
 
   @RetryingTest(5)
@@ -218,7 +221,7 @@ class FastFallbackTest {
         TestUtil.UNREACHABLE_ADDRESS_IPV6.address,
         localhostIpv4,
       )
-    serverIpv6.shutdown()
+    serverIpv6.close()
     serverIpv4.enqueue(
       MockResponse(body = "hello from IPv4"),
     )
@@ -228,8 +231,8 @@ class FastFallbackTest {
     assertThat(response.body.string()).isEqualTo("hello from IPv4")
 
     // In the process we made two connection attempts including one failure.
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectStart" }).hasSize(2)
-    assertThat(listener.recordedEventTypes().filter { it == "ConnectFailed" }).hasSize(1)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectStart::class }).hasSize(2)
+    assertThat(eventRecorder.recordedEventTypes().filter { it == ConnectFailed::class }).hasSize(1)
   }
 
   @Test
@@ -239,7 +242,7 @@ class FastFallbackTest {
         TestUtil.UNREACHABLE_ADDRESS_IPV4.address,
         localhostIpv6,
       )
-    serverIpv4.shutdown()
+    serverIpv4.close()
     serverIpv6.enqueue(
       MockResponse(body = "hello from IPv6"),
     )
@@ -263,7 +266,7 @@ class FastFallbackTest {
    * already had a healthy connection. It sets up a deferred connection by stalling the IPv6
    * connect, and it sets up a same-connection retry with [ErrorCode.REFUSED_STREAM].
    *
-   * https://github.com/square/okhttp/pull/7190
+   * https://github.com/lysine-dev/okhttp/pull/7190
    */
   @Test
   fun preferCallConnectionOverDeferredConnection() {
@@ -309,7 +312,10 @@ class FastFallbackTest {
 
     // Set up a same-connection retry.
     serverIpv4.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     serverIpv4.enqueue(
       MockResponse(body = "this was the 2nd request on IPv4"),
@@ -322,7 +328,7 @@ class FastFallbackTest {
     val call = client.newCall(Request(url))
     val response = call.execute()
     assertThat(response.body.string()).isEqualTo("this was the 2nd request on IPv4")
-    assertThat(serverIpv4.takeRequest().sequenceNumber).isEqualTo(0)
-    assertThat(serverIpv4.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(serverIpv4.takeRequest().exchangeIndex).isEqualTo(0)
+    assertThat(serverIpv4.takeRequest().exchangeIndex).isEqualTo(1)
   }
 }

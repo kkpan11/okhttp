@@ -15,37 +15,34 @@
  */
 package okhttp3.sse.internal
 
+import assertk.assertThat
+import assertk.assertions.isEqualTo
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.junit5.internal.MockWebServerExtension
+import mockwebserver3.junit5.StartStop
+import okhttp3.Headers
 import okhttp3.OkHttpClientTestRule
 import okhttp3.Request
 import okhttp3.sse.EventSources.processResponse
 import okhttp3.testing.PlatformRule
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.extension.ExtendWith
 import org.junit.jupiter.api.extension.RegisterExtension
 
 @Tag("Slowish")
-@ExtendWith(MockWebServerExtension::class)
 class EventSourcesHttpTest {
   @RegisterExtension
   val platform = PlatformRule()
-  private lateinit var server: MockWebServer
+
+  @StartStop
+  private val server = MockWebServer()
 
   @RegisterExtension
   val clientTestRule = OkHttpClientTestRule()
 
   private val listener = EventSourceRecorder()
   private val client = clientTestRule.newClient()
-
-  @BeforeEach
-  fun before(server: MockWebServer) {
-    this.server = server
-  }
 
   @AfterEach
   fun after() {
@@ -66,11 +63,7 @@ class EventSourcesHttpTest {
         ).setHeader("content-type", "text/event-stream")
         .build(),
     )
-    val request =
-      Request
-        .Builder()
-        .url(server.url("/"))
-        .build()
+    val request = Request.Builder().url(server.url("/")).build()
     val response = client.newCall(request).execute()
     processResponse(response, listener)
     listener.assertOpen()
@@ -93,14 +86,45 @@ class EventSourcesHttpTest {
         .build(),
     )
     listener.enqueueCancel() // Will cancel in onOpen().
-    val request =
-      Request
-        .Builder()
-        .url(server.url("/"))
-        .build()
+    val request = Request.Builder().url(server.url("/")).build()
     val response = client.newCall(request).execute()
     processResponse(response, listener)
     listener.assertOpen()
     listener.assertFailure("canceled")
+  }
+
+  @Test
+  fun failureWith401IsReadable() {
+    server.enqueue(
+      MockResponse(
+        code = 401,
+        body = "{\"error\":{\"message\":\"No auth credentials found\",\"code\":401}}",
+        headers = Headers.headersOf("content-type", "application/json"),
+      ),
+    )
+    server.enqueue(
+      MockResponse(
+        body =
+          """
+          |data: hey
+          |
+          |
+          """.trimMargin(),
+        headers = Headers.headersOf("content-type", "text/event-stream"),
+      ),
+    )
+
+    val request1 = Request.Builder().url(server.url("/")).build()
+    val response1 = client.newCall(request1).execute()
+    assertThat(response1.code).isEqualTo(401)
+    assertThat(response1.body.string())
+      .isEqualTo("{\"error\":{\"message\":\"No auth credentials found\",\"code\":401}}")
+
+    val request2 = request1.newBuilder().header("Authorization", "XYZ").build()
+    val response2 = client.newCall(request2).execute()
+    processResponse(response2, listener)
+    listener.assertOpen()
+    listener.assertEvent(null, null, "hey")
+    listener.assertClose()
   }
 }

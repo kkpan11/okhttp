@@ -21,13 +21,35 @@ import assertk.assertions.isEqualTo
 import assertk.assertions.isNotNull
 import assertk.fail
 import javax.net.ssl.SSLSocket
+import kotlin.reflect.KClass
 import kotlin.test.assertFailsWith
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.SocketPolicy.DoNotReadRequestBody
+import mockwebserver3.junit5.StartStop
+import okhttp3.CallEvent.CallEnd
+import okhttp3.CallEvent.CallStart
+import okhttp3.CallEvent.ConnectEnd
+import okhttp3.CallEvent.ConnectStart
+import okhttp3.CallEvent.ConnectionAcquired
+import okhttp3.CallEvent.ConnectionReleased
+import okhttp3.CallEvent.DnsEnd
+import okhttp3.CallEvent.DnsStart
+import okhttp3.CallEvent.FollowUpDecision
+import okhttp3.CallEvent.ProxySelectEnd
+import okhttp3.CallEvent.ProxySelectStart
+import okhttp3.CallEvent.RequestBodyStart
+import okhttp3.CallEvent.RequestFailed
+import okhttp3.CallEvent.RequestHeadersEnd
+import okhttp3.CallEvent.RequestHeadersStart
+import okhttp3.CallEvent.ResponseBodyEnd
+import okhttp3.CallEvent.ResponseBodyStart
+import okhttp3.CallEvent.ResponseHeadersEnd
+import okhttp3.CallEvent.ResponseHeadersStart
+import okhttp3.CallEvent.SecureConnectEnd
+import okhttp3.CallEvent.SecureConnectStart
 import okhttp3.Headers.Companion.headersOf
+import okhttp3.TestUtil.assumeNotWindows
 import okhttp3.internal.duplex.AsyncRequestBody
-import okhttp3.internal.http2.ErrorCode
 import okhttp3.testing.PlatformRule
 import okio.BufferedSink
 import okio.IOException
@@ -50,26 +72,30 @@ class ServerTruncatesRequestTest {
   @JvmField
   var clientTestRule = OkHttpClientTestRule()
 
-  private val listener = RecordingEventListener()
+  private val eventRecorder = EventRecorder()
   private val handshakeCertificates = platform.localhostHandshakeCertificates()
 
   private var client =
     clientTestRule
       .newClientBuilder()
-      .eventListenerFactory(clientTestRule.wrap(listener))
+      .eventListenerFactory(clientTestRule.wrap(eventRecorder))
       .build()
 
-  private lateinit var server: MockWebServer
+  @StartStop
+  private val server = MockWebServer()
 
   @BeforeEach
-  fun setUp(server: MockWebServer) {
-    this.server = server
+  fun setUp() {
     platform.assumeNotOpenJSSE()
     platform.assumeHttp2Support()
   }
 
   @Test
   fun serverTruncatesRequestOnLongPostHttp1() {
+    // "java.net.SocketException: Socket closed" thrown reading response after
+    // "java.net.SocketException: Connection reset by peer" writing request
+    assumeNotWindows()
+
     serverTruncatesRequestOnLongPost(https = false)
   }
 
@@ -81,10 +107,11 @@ class ServerTruncatesRequestTest {
 
   private fun serverTruncatesRequestOnLongPost(https: Boolean) {
     server.enqueue(
-      MockResponse(
-        body = "abc",
-        socketPolicy = DoNotReadRequestBody(ErrorCode.NO_ERROR.httpCode),
-      ),
+      MockResponse
+        .Builder()
+        .body("abc")
+        .doNotReadRequestBody()
+        .build(),
     )
 
     val call =
@@ -99,32 +126,33 @@ class ServerTruncatesRequestTest {
       assertThat(response.body.string()).isEqualTo("abc")
     }
 
-    val expectedEvents = mutableListOf<String>()
+    val expectedEvents = mutableListOf<KClass<out CallEvent>>()
     // Start out with standard events...
-    expectedEvents += "CallStart"
-    expectedEvents += "ProxySelectStart"
-    expectedEvents += "ProxySelectEnd"
-    expectedEvents += "DnsStart"
-    expectedEvents += "DnsEnd"
-    expectedEvents += "ConnectStart"
+    expectedEvents += CallStart::class
+    expectedEvents += ProxySelectStart::class
+    expectedEvents += ProxySelectEnd::class
+    expectedEvents += DnsStart::class
+    expectedEvents += DnsEnd::class
+    expectedEvents += ConnectStart::class
     if (https) {
-      expectedEvents += "SecureConnectStart"
-      expectedEvents += "SecureConnectEnd"
+      expectedEvents += SecureConnectStart::class
+      expectedEvents += SecureConnectEnd::class
     }
-    expectedEvents += "ConnectEnd"
-    expectedEvents += "ConnectionAcquired"
-    expectedEvents += "RequestHeadersStart"
-    expectedEvents += "RequestHeadersEnd"
-    expectedEvents += "RequestBodyStart"
+    expectedEvents += ConnectEnd::class
+    expectedEvents += ConnectionAcquired::class
+    expectedEvents += RequestHeadersStart::class
+    expectedEvents += RequestHeadersEnd::class
+    expectedEvents += RequestBodyStart::class
     // ... but we can read the response even after writing the request fails.
-    expectedEvents += "RequestFailed"
-    expectedEvents += "ResponseHeadersStart"
-    expectedEvents += "ResponseHeadersEnd"
-    expectedEvents += "ResponseBodyStart"
-    expectedEvents += "ResponseBodyEnd"
-    expectedEvents += "ConnectionReleased"
-    expectedEvents += "CallEnd"
-    assertThat(listener.recordedEventTypes()).isEqualTo(expectedEvents)
+    expectedEvents += RequestFailed::class
+    expectedEvents += ResponseHeadersStart::class
+    expectedEvents += ResponseHeadersEnd::class
+    expectedEvents += FollowUpDecision::class
+    expectedEvents += ResponseBodyStart::class
+    expectedEvents += ResponseBodyEnd::class
+    expectedEvents += ConnectionReleased::class
+    expectedEvents += CallEnd::class
+    assertThat(eventRecorder.recordedEventTypes()).isEqualTo(expectedEvents)
 
     // Confirm that the connection pool was not corrupted by making another call.
     makeSimpleCall()
@@ -139,10 +167,11 @@ class ServerTruncatesRequestTest {
     enableProtocol(Protocol.HTTP_2)
 
     server.enqueue(
-      MockResponse(
-        body = "abc",
-        socketPolicy = DoNotReadRequestBody(ErrorCode.NO_ERROR.httpCode),
-      ),
+      MockResponse
+        .Builder()
+        .body("abc")
+        .doNotReadRequestBody()
+        .build(),
     )
 
     val requestBody = AsyncRequestBody()
@@ -172,6 +201,10 @@ class ServerTruncatesRequestTest {
 
   @Test
   fun serverTruncatesRequestButTrailersCanStillBeReadHttp1() {
+    // "java.net.SocketException: Socket closed" thrown reading response after
+    // "java.net.SocketException: Connection reset by peer" writing request
+    assumeNotWindows()
+
     serverTruncatesRequestButTrailersCanStillBeRead(http2 = false)
   }
 
@@ -185,7 +218,7 @@ class ServerTruncatesRequestTest {
     val mockResponse =
       MockResponse
         .Builder()
-        .socketPolicy(DoNotReadRequestBody(ErrorCode.NO_ERROR.httpCode))
+        .doNotReadRequestBody()
         .trailers(headersOf("caboose", "xyz"))
 
     // Trailers always work for HTTP/2, but only for chunked bodies in HTTP/1.
@@ -211,7 +244,7 @@ class ServerTruncatesRequestTest {
     }
   }
 
-  @Disabled("Follow up with fix in https://github.com/square/okhttp/issues/6853")
+  @Disabled("Follow up with fix in https://github.com/lysine-dev/okhttp/issues/6853")
   @Test
   fun serverDisconnectsBeforeSecondRequestHttp1() {
     enableProtocol(Protocol.HTTP_1_1)

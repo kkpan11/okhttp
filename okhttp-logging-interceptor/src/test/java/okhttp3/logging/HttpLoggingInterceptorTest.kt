@@ -24,7 +24,7 @@ import assertk.assertions.matches
 import java.net.UnknownHostException
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.junit5.internal.MockWebServerExtension
+import mockwebserver3.junit5.StartStop
 import okhttp3.HttpUrl
 import okhttp3.Interceptor
 import okhttp3.MediaType
@@ -34,8 +34,8 @@ import okhttp3.Protocol
 import okhttp3.RecordingHostnameVerifier
 import okhttp3.Request
 import okhttp3.RequestBody
-import okhttp3.RequestBody.Companion.gzip
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.WebSocketListener
 import okhttp3.logging.HttpLoggingInterceptor.Level
 import okhttp3.testing.PlatformRule
 import okio.Buffer
@@ -45,14 +45,15 @@ import org.junit.jupiter.api.Assertions.fail
 import org.junit.jupiter.api.Assumptions
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.extension.ExtendWith
 import org.junit.jupiter.api.extension.RegisterExtension
 
-@ExtendWith(MockWebServerExtension::class)
 class HttpLoggingInterceptorTest {
   @RegisterExtension
   val platform = PlatformRule()
-  private lateinit var server: MockWebServer
+
+  @StartStop
+  private val server = MockWebServer()
+
   private val handshakeCertificates = platform.localhostHandshakeCertificates()
   private val hostnameVerifier = RecordingHostnameVerifier()
   private lateinit var client: OkHttpClient
@@ -70,8 +71,7 @@ class HttpLoggingInterceptorTest {
   }
 
   @BeforeEach
-  fun setUp(server: MockWebServer) {
-    this.server = server
+  fun setUp() {
     client =
       OkHttpClient
         .Builder()
@@ -586,8 +586,8 @@ class HttpLoggingInterceptorTest {
       client
         .newCall(
           request()
-            .addHeader("Content-Encoding", "gzip")
-            .post("Uncompressed".toRequestBody().gzip())
+            .post("Uncompressed".toRequestBody())
+            .gzip()
             .build(),
         ).execute()
     val responseBody = response.body
@@ -740,6 +740,57 @@ class HttpLoggingInterceptorTest {
   }
 
   @Test
+  fun bodyResponseIsUnreadable() {
+    setLevel(Level.BODY)
+    val serverListener = object : WebSocketListener() {}
+    server.enqueue(
+      MockResponse
+        .Builder()
+        .webSocketUpgrade(serverListener)
+        .build(),
+    )
+    val response =
+      client
+        .newCall(
+          request()
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Key", "abc123")
+            .build(),
+        ).execute()
+    response.body.close()
+    networkLogs
+      .assertLogEqual("--> GET $url http/1.1")
+      .assertLogEqual("Connection: Upgrade")
+      .assertLogEqual("Upgrade: websocket")
+      .assertLogEqual("Sec-WebSocket-Key: abc123")
+      .assertLogEqual("Host: $host")
+      .assertLogEqual("Accept-Encoding: gzip")
+      .assertLogMatch(Regex("""User-Agent: okhttp/.+"""))
+      .assertLogEqual("--> END GET")
+      .assertLogMatch(Regex("""<-- 101 Switching Protocols $url \(\d+ms\)"""))
+      .assertLogEqual("Content-Length: 0")
+      .assertLogEqual("Connection: Upgrade")
+      .assertLogEqual("Upgrade: websocket")
+      .assertLogMatch(Regex("""Sec-WebSocket-Accept: .+"""))
+      .assertLogEqual("<-- END HTTP (unreadable body)")
+      .assertNoMoreLogs()
+    applicationLogs
+      .assertLogEqual("--> GET $url")
+      .assertLogEqual("Connection: Upgrade")
+      .assertLogEqual("Upgrade: websocket")
+      .assertLogEqual("Sec-WebSocket-Key: abc123")
+      .assertLogEqual("--> END GET")
+      .assertLogMatch(Regex("""<-- 101 Switching Protocols $url \(\d+ms\)"""))
+      .assertLogEqual("Content-Length: 0")
+      .assertLogEqual("Connection: Upgrade")
+      .assertLogEqual("Upgrade: websocket")
+      .assertLogMatch(Regex("""Sec-WebSocket-Accept: .+"""))
+      .assertLogEqual("<-- END HTTP (unreadable body)")
+      .assertNoMoreLogs()
+  }
+
+  @Test
   fun bodyGetMalformedCharset() {
     setLevel(Level.BODY)
     server.enqueue(
@@ -838,7 +889,7 @@ class HttpLoggingInterceptorTest {
     }
     applicationLogs
       .assertLogEqual("--> GET $url")
-      .assertLogEqual("<-- HTTP FAILED: java.net.UnknownHostException: reason")
+      .assertLogMatch(Regex("""<-- HTTP FAILED: java.net.UnknownHostException: reason. $url \(\d+ms\)"""))
       .assertNoMoreLogs()
   }
 
@@ -922,7 +973,6 @@ class HttpLoggingInterceptorTest {
       .assertNoMoreLogs()
   }
 
-  @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
   @Test
   fun sensitiveQueryParamsAreRedacted() {
     url = server.url("/api/login?user=test_user&authentication=basic&password=confidential_password")
@@ -968,7 +1018,6 @@ class HttpLoggingInterceptorTest {
       .assertNoMoreLogs()
   }
 
-  @Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
   @Test
   fun preserveQueryParamsAfterRedacted() {
     url =

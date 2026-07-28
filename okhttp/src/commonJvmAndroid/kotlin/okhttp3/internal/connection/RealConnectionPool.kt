@@ -18,54 +18,35 @@ package okhttp3.internal.connection
 
 import java.net.Socket
 import java.util.concurrent.ConcurrentLinkedQueue
-import java.util.concurrent.ThreadLocalRandom
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReferenceFieldUpdater
 import okhttp3.Address
-import okhttp3.ConnectionListener
 import okhttp3.ConnectionPool
 import okhttp3.Route
-import okhttp3.internal.assertHeld
 import okhttp3.internal.closeQuietly
 import okhttp3.internal.concurrent.Task
 import okhttp3.internal.concurrent.TaskQueue
 import okhttp3.internal.concurrent.TaskRunner
-import okhttp3.internal.connection.Locks.withLock
+import okhttp3.internal.concurrent.assertLockHeld
+import okhttp3.internal.concurrent.withLock
 import okhttp3.internal.connection.RealCall.CallReference
 import okhttp3.internal.okHttpName
 import okhttp3.internal.platform.Platform
-import okio.IOException
 
-class RealConnectionPool(
-  private val taskRunner: TaskRunner,
-  /**
-   * The maximum number of idle connections across all addresses.
-   * Connections needed to satisfy a [ConnectionPool.AddressPolicy] are not considered idle.
-   */
+class RealConnectionPool internal constructor(
+  taskRunner: TaskRunner,
+  /** The maximum number of idle connections across all addresses. */
   private val maxIdleConnections: Int,
   keepAliveDuration: Long,
   timeUnit: TimeUnit,
   internal val connectionListener: ConnectionListener,
-  private val exchangeFinderFactory: (RealConnectionPool, Address, ConnectionUser) -> ExchangeFinder,
 ) {
   internal val keepAliveDurationNs: Long = timeUnit.toNanos(keepAliveDuration)
-
-  @Volatile
-  private var addressStates: Map<Address, AddressState> = mapOf()
 
   private val cleanupQueue: TaskQueue = taskRunner.newQueue()
   private val cleanupTask =
     object : Task("$okHttpName ConnectionPool connection closer") {
       override fun runOnce(): Long = closeConnections(System.nanoTime())
     }
-
-  private fun AddressState.scheduleOpener() {
-    queue.schedule(
-      object : Task("$okHttpName ConnectionPool connection opener") {
-        override fun runOnce(): Long = openConnections(this@scheduleOpener)
-      },
-    )
-  }
 
   /**
    * Holding the lock of the connection being added or removed when mutating this, and check its
@@ -87,9 +68,9 @@ class RealConnectionPool(
   fun connectionCount(): Int = connections.size
 
   /**
-   * Attempts to acquire a recycled connection to [address] for [connectionUser]. Returns the connection if it
+   * Attempts to acquire a recycled connection to [address] for [call]. Returns the connection if it
    * was acquired, or null if no connection was acquired. The acquired connection will also be
-   * given to [connectionUser] who may (for example) assign it to a [RealCall.connection].
+   * given to [call] who may (for example) assign it to a [RealCall.connection].
    *
    * This confirms the returned connection is healthy before returning it. If this encounters any
    * unhealthy connections in its search, this will clean them up.
@@ -98,10 +79,10 @@ class RealConnectionPool(
    * This is used to coalesce related domains to the same HTTP/2 connection, such as `square.com`
    * and `square.ca`.
    */
-  fun callAcquirePooledConnection(
+  internal fun callAcquirePooledConnection(
     doExtensiveHealthChecks: Boolean,
     address: Address,
-    connectionUser: ConnectionUser,
+    call: RealCall,
     routes: List<Route>?,
     requireMultiplexed: Boolean,
   ): RealConnection? {
@@ -110,10 +91,16 @@ class RealConnectionPool(
       val acquired =
         connection.withLock {
           when {
-            requireMultiplexed && !connection.isMultiplexed -> false
-            !connection.isEligible(address, routes) -> false
+            requireMultiplexed && !connection.isMultiplexed -> {
+              false
+            }
+
+            !connection.isEligible(address, routes) -> {
+              false
+            }
+
             else -> {
-              connectionUser.acquireConnectionNoEvents(connection)
+              call.acquireConnectionNoEvents(connection)
               true
             }
           }
@@ -130,7 +117,7 @@ class RealConnectionPool(
         connection.withLock {
           noNewExchangesEvent = !connection.noNewExchanges
           connection.noNewExchanges = true
-          connectionUser.releaseConnectionNoEvents()
+          call.releaseConnectionNoEvents()
         }
       if (toClose != null) {
         toClose.closeQuietly()
@@ -143,7 +130,7 @@ class RealConnectionPool(
   }
 
   fun put(connection: RealConnection) {
-    connection.lock.assertHeld()
+    connection.assertLockHeld()
 
     connections.add(connection)
 //    connection.queueEvent { connectionListener.connectEnd(connection) }
@@ -155,13 +142,12 @@ class RealConnectionPool(
    * removed from the pool and should be closed.
    */
   fun connectionBecameIdle(connection: RealConnection): Boolean {
-    connection.lock.assertHeld()
+    connection.assertLockHeld()
 
     return if (connection.noNewExchanges || maxIdleConnections == 0) {
       connection.noNewExchanges = true
       connections.remove(connection)
       if (connections.isEmpty()) cleanupQueue.cancelAll()
-      scheduleOpener(connection.route.address)
       true
     } else {
       scheduleCloser()
@@ -190,10 +176,6 @@ class RealConnectionPool(
     }
 
     if (connections.isEmpty()) cleanupQueue.cancelAll()
-
-    for (policy in addressStates.values) {
-      policy.scheduleOpener()
-    }
   }
 
   /**
@@ -204,19 +186,6 @@ class RealConnectionPool(
    * Returns -1 if no further cleanups are required.
    */
   fun closeConnections(now: Long): Long {
-    // Compute the concurrent call capacity for each address. We won't close a connection if doing
-    // so would violate a policy, unless it's OLD.
-    val addressStates = this.addressStates
-    for (state in addressStates.values) {
-      state.concurrentCallCapacity = 0
-    }
-    for (connection in connections) {
-      val addressState = addressStates[connection.route.address] ?: continue
-      connection.withLock {
-        addressState.concurrentCallCapacity += connection.allocationLimit
-      }
-    }
-
     // Find the longest-idle connections in 2 categories:
     //
     //  1. OLD: Connections that have been idle for at least keepAliveDurationNs. We close these if
@@ -249,12 +218,10 @@ class RealConnectionPool(
           earliestOldConnection = connection
         }
 
-        if (isEvictable(addressStates, connection)) {
-          evictableConnectionCount++
-          if (idleAtNs < earliestEvictableIdleAtNs) {
-            earliestEvictableIdleAtNs = idleAtNs
-            earliestEvictableConnection = connection
-          }
+        evictableConnectionCount++
+        if (idleAtNs < earliestEvictableIdleAtNs) {
+          earliestEvictableIdleAtNs = idleAtNs
+          earliestEvictableConnection = connection
         }
       }
     }
@@ -289,7 +256,6 @@ class RealConnectionPool(
           toEvict.noNewExchanges = true
           connections.remove(toEvict)
         }
-        addressStates[toEvict.route.address]?.scheduleOpener()
         toEvict.socket().closeQuietly()
         connectionListener.connectionClosed(toEvict)
         if (connections.isEmpty()) cleanupQueue.cancelAll()
@@ -315,16 +281,6 @@ class RealConnectionPool(
     }
   }
 
-  /** Returns true if no address policies prevent [connection] from being evicted. */
-  private fun isEvictable(
-    addressStates: Map<Address, AddressState>,
-    connection: RealConnection,
-  ): Boolean {
-    val addressState = addressStates[connection.route.address] ?: return true
-    val capacityWithoutIt = addressState.concurrentCallCapacity - connection.allocationLimit
-    return capacityWithoutIt >= addressState.policy.minimumConcurrentCalls
-  }
-
   /**
    * Prunes any leaked calls and then returns the number of remaining live calls on [connection].
    * Calls are leaked if the connection is tracking them but the application code has abandoned
@@ -334,7 +290,7 @@ class RealConnectionPool(
     connection: RealConnection,
     now: Long,
   ): Int {
-    connection.lock.assertHeld()
+    connection.assertLockHeld()
 
     val references = connection.calls
     var i = 0
@@ -365,101 +321,11 @@ class RealConnectionPool(
     return references.size
   }
 
-  /**
-   * Adds or replaces the policy for [address].
-   * This will trigger a background task to start creating connections as needed.
-   */
-  fun setPolicy(
-    address: Address,
-    policy: ConnectionPool.AddressPolicy,
-  ) {
-    val state = AddressState(address, taskRunner.newQueue(), policy)
-    val newConnectionsNeeded: Int
-
-    while (true) {
-      val oldMap = this.addressStates
-      val newMap = oldMap + (address to state)
-      if (addressStatesUpdater.compareAndSet(this, oldMap, newMap)) {
-        val oldPolicyMinimumConcurrentCalls = oldMap[address]?.policy?.minimumConcurrentCalls ?: 0
-        newConnectionsNeeded = policy.minimumConcurrentCalls - oldPolicyMinimumConcurrentCalls
-        break
-      }
-    }
-
-    when {
-      newConnectionsNeeded > 0 -> state.scheduleOpener()
-      newConnectionsNeeded < 0 -> scheduleCloser()
-    }
-  }
-
-  /** Open connections to [address], if required by the address policy. */
-  fun scheduleOpener(address: Address) {
-    addressStates[address]?.scheduleOpener()
-  }
-
   fun scheduleCloser() {
     cleanupQueue.schedule(cleanupTask)
   }
 
-  /**
-   * Ensure enough connections open to [address] to satisfy its [ConnectionPool.AddressPolicy].
-   * If there are already enough connections, we're done.
-   * If not, we create one and then schedule the task to run again immediately.
-   */
-  private fun openConnections(state: AddressState): Long {
-    // This policy does not require minimum connections, don't run again
-    if (state.policy.minimumConcurrentCalls == 0) return -1L
-
-    var concurrentCallCapacity = 0
-    for (connection in connections) {
-      if (state.address != connection.route.address) continue
-      connection.withLock {
-        concurrentCallCapacity += connection.allocationLimit
-      }
-
-      // The policy was satisfied by existing connections, don't run again
-      if (concurrentCallCapacity >= state.policy.minimumConcurrentCalls) return -1L
-    }
-
-    // If we got here then the policy was not satisfied -- open a connection!
-    try {
-      val connection = exchangeFinderFactory(this, state.address, PoolConnectionUser).find()
-
-      // RealRoutePlanner will add the connection to the pool itself, other RoutePlanners may not
-      // TODO: make all RoutePlanners consistent in this behavior
-      if (connection !in connections) {
-        connection.withLock { put(connection) }
-      }
-
-      return 0L // run again immediately to create more connections if needed
-    } catch (e: IOException) {
-      // No need to log, user.connectFailed() will already have been called. Just try again later.
-      return state.policy.backoffDelayMillis.jitterBy(state.policy.backoffJitterMillis) * 1_000_000
-    }
-  }
-
-  private fun Long.jitterBy(amount: Int): Long = this + ThreadLocalRandom.current().nextInt(amount * -1, amount)
-
-  class AddressState(
-    val address: Address,
-    val queue: TaskQueue,
-    var policy: ConnectionPool.AddressPolicy,
-  ) {
-    /**
-     * How many calls the pool can carry without opening new connections. This field must only be
-     * accessed by the connection closer task.
-     */
-    var concurrentCallCapacity: Int = 0
-  }
-
   companion object {
     fun get(connectionPool: ConnectionPool): RealConnectionPool = connectionPool.delegate
-
-    private var addressStatesUpdater =
-      AtomicReferenceFieldUpdater.newUpdater(
-        RealConnectionPool::class.java,
-        Map::class.java,
-        "addressStates",
-      )
   }
 }

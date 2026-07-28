@@ -21,42 +21,54 @@ import assertk.assertions.isEqualTo
 import java.util.concurrent.TimeUnit
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.junit5.internal.MockWebServerExtension
+import mockwebserver3.junit5.StartStop
+import okhttp3.CallEvent.CallEnd
+import okhttp3.CallEvent.CallStart
+import okhttp3.CallEvent.ConnectEnd
+import okhttp3.CallEvent.ConnectStart
+import okhttp3.CallEvent.ConnectionAcquired
+import okhttp3.CallEvent.ConnectionReleased
+import okhttp3.CallEvent.DnsEnd
+import okhttp3.CallEvent.DnsStart
+import okhttp3.CallEvent.FollowUpDecision
+import okhttp3.CallEvent.ProxySelectEnd
+import okhttp3.CallEvent.ProxySelectStart
+import okhttp3.CallEvent.RequestHeadersEnd
+import okhttp3.CallEvent.RequestHeadersStart
+import okhttp3.CallEvent.ResponseBodyEnd
+import okhttp3.CallEvent.ResponseBodyStart
+import okhttp3.CallEvent.ResponseHeadersEnd
+import okhttp3.CallEvent.ResponseHeadersStart
+import okhttp3.EventRecorder
+import okhttp3.Headers
 import okhttp3.OkHttpClientTestRule
-import okhttp3.RecordingEventListener
 import okhttp3.Request
 import okhttp3.sse.EventSource
 import okhttp3.sse.EventSources.createFactory
 import okhttp3.testing.PlatformRule
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
-import org.junit.jupiter.api.extension.ExtendWith
 import org.junit.jupiter.api.extension.RegisterExtension
 import org.junitpioneer.jupiter.RetryingTest
 
 @Tag("Slowish")
-@ExtendWith(MockWebServerExtension::class)
 class EventSourceHttpTest {
   @RegisterExtension
   val platform = PlatformRule()
-  private lateinit var server: MockWebServer
+
+  @StartStop
+  private val server = MockWebServer()
 
   @RegisterExtension
   val clientTestRule = OkHttpClientTestRule()
-  private val eventListener = RecordingEventListener()
+  private val eventRecorder = EventRecorder()
   private val listener = EventSourceRecorder()
   private var client =
     clientTestRule
       .newClientBuilder()
-      .eventListenerFactory(clientTestRule.wrap(eventListener))
+      .eventListenerFactory(clientTestRule.wrap(eventRecorder))
       .build()
-
-  @BeforeEach
-  fun before(server: MockWebServer) {
-    this.server = server
-  }
 
   @AfterEach
   fun after() {
@@ -244,24 +256,75 @@ class EventSourceHttpTest {
     listener.assertOpen()
     listener.assertEvent(null, null, "hey")
     listener.assertClose()
-    assertThat(eventListener.recordedEventTypes()).containsExactly(
-      "CallStart",
-      "ProxySelectStart",
-      "ProxySelectEnd",
-      "DnsStart",
-      "DnsEnd",
-      "ConnectStart",
-      "ConnectEnd",
-      "ConnectionAcquired",
-      "RequestHeadersStart",
-      "RequestHeadersEnd",
-      "ResponseHeadersStart",
-      "ResponseHeadersEnd",
-      "ResponseBodyStart",
-      "ResponseBodyEnd",
-      "ConnectionReleased",
-      "CallEnd",
+    assertThat(eventRecorder.recordedEventTypes()).containsExactly(
+      CallStart::class,
+      ProxySelectStart::class,
+      ProxySelectEnd::class,
+      DnsStart::class,
+      DnsEnd::class,
+      ConnectStart::class,
+      ConnectEnd::class,
+      ConnectionAcquired::class,
+      RequestHeadersStart::class,
+      RequestHeadersEnd::class,
+      ResponseHeadersStart::class,
+      ResponseHeadersEnd::class,
+      FollowUpDecision::class,
+      ResponseBodyStart::class,
+      ResponseBodyEnd::class,
+      ConnectionReleased::class,
+      CallEnd::class,
     )
+  }
+
+  @Test
+  fun sseReauths() {
+    client =
+      client
+        .newBuilder()
+        .authenticator { route, response ->
+          response.request
+            .newBuilder()
+            .header("Authorization", "XYZ")
+            .build()
+        }.build()
+    server.enqueue(
+      MockResponse(
+        code = 401,
+        body = "{\"error\":{\"message\":\"No auth credentials found\",\"code\":401}}",
+        headers = Headers.headersOf("content-type", "application/json"),
+      ),
+    )
+    server.enqueue(
+      MockResponse(
+        body =
+          """
+          |data: hey
+          |
+          |
+          """.trimMargin(),
+        headers = Headers.headersOf("content-type", "text/event-stream"),
+      ),
+    )
+    val source = newEventSource()
+    assertThat(source.request().url.encodedPath).isEqualTo("/")
+    listener.assertOpen()
+    listener.assertEvent(null, null, "hey")
+    listener.assertClose()
+  }
+
+  @Test
+  fun sseWithoutAuthenticator() {
+    server.enqueue(
+      MockResponse(
+        code = 401,
+        body = "{\"error\":{\"message\":\"No auth credentials found\",\"code\":401}}",
+        headers = Headers.headersOf("content-type", "application/json"),
+      ),
+    )
+    val source = newEventSource()
+    assertThat(source.request().url.encodedPath).isEqualTo("/")
+    listener.assertFailure(code = 401, message = "{\"error\":{\"message\":\"No auth credentials found\",\"code\":401}}")
   }
 
   private fun newEventSource(accept: String? = null): EventSource {

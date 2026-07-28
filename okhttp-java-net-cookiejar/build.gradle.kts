@@ -1,25 +1,19 @@
-import com.vanniktech.maven.publish.JavadocJar
-import com.vanniktech.maven.publish.KotlinJvm
-
 plugins {
   kotlin("jvm")
-  id("org.jetbrains.dokka")
-  id("com.vanniktech.maven.publish.base")
-  id("binary-compatibility-validator")
+  id("okhttp.publish-conventions")
+  id("okhttp.jvm-conventions")
+  id("okhttp.quality-conventions")
+  id("okhttp.testing-conventions")
 }
 
 project.applyOsgi(
   "Export-Package: okhttp3.java.net.cookiejar",
-  "Automatic-Module-Name: okhttp3.java.net.cookiejar",
-  "Bundle-SymbolicName: com.squareup.okhttp3.java.net.cookiejar"
+  "Bundle-SymbolicName: com.squareup.okhttp3.java.net.cookiejar",
 )
 
-dependencies {
-  api(projects.okhttp)
-  compileOnly(libs.findbugs.jsr305)
-  compileOnly(libs.animalsniffer.annotations)
-}
+project.applyJavaModules("okhttp3.java.net.cookiejar")
 
-mavenPublishing {
-  configure(KotlinJvm(javadocJar = JavadocJar.Empty()))
+dependencies {
+  "friendsApi"(projects.okhttp)
+  compileOnly(libs.animalsniffer.annotations)
 }

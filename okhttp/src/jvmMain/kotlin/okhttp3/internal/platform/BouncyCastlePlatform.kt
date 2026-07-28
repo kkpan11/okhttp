@@ -23,6 +23,7 @@ import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
 import okhttp3.Protocol
+import okio.ByteString
 import org.bouncycastle.jsse.BCSSLSocket
 import org.bouncycastle.jsse.provider.BouncyCastleJsseProvider
 
@@ -59,6 +60,7 @@ class BouncyCastlePlatform private constructor() : Platform() {
     sslSocket: SSLSocket,
     hostname: String?,
     protocols: List<@JvmSuppressWildcards Protocol>,
+    echConfigList: ByteString?,
   ) {
     if (sslSocket is BCSSLSocket) {
       val sslParameters = sslSocket.parameters
@@ -69,7 +71,7 @@ class BouncyCastlePlatform private constructor() : Platform() {
 
       sslSocket.parameters = sslParameters
     } else {
-      super.configureTlsExtensions(sslSocket, hostname, protocols)
+      super.configureTlsExtensions(sslSocket, hostname, protocols, echConfigList)
     }
   }
 
@@ -78,6 +80,7 @@ class BouncyCastlePlatform private constructor() : Platform() {
       when (val protocol = (sslSocket as BCSSLSocket).applicationProtocol) {
         // Handles both un-configured and none selected.
         null, "" -> null
+
         else -> protocol
       }
     } else {
@@ -88,7 +91,7 @@ class BouncyCastlePlatform private constructor() : Platform() {
     val isSupported: Boolean =
       try {
         // Trigger an early exception over a fatal error, prefer a RuntimeException over Error.
-        Class.forName("org.bouncycastle.jsse.provider.BouncyCastleJsseProvider", false, javaClass.classLoader)
+        Class.forName("org.bouncycastle.jsse.provider.BouncyCastleJsseProvider", false, BouncyCastlePlatform::class.java.classLoader)
 
         true
       } catch (_: ClassNotFoundException) {

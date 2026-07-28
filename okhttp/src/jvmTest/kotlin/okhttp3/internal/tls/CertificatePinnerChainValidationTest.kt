@@ -30,7 +30,8 @@ import javax.net.ssl.TrustManager
 import kotlin.test.assertFailsWith
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.SocketPolicy.DisconnectAtEnd
+import mockwebserver3.SocketEffect.ShutdownConnection
+import mockwebserver3.junit5.StartStop
 import okhttp3.CertificatePinner
 import okhttp3.CertificatePinner.Companion.pin
 import okhttp3.OkHttpClientTestRule
@@ -53,11 +54,11 @@ class CertificatePinnerChainValidationTest {
   @RegisterExtension
   var clientTestRule = OkHttpClientTestRule()
 
-  private lateinit var server: MockWebServer
+  @StartStop
+  private val server = MockWebServer()
 
   @BeforeEach
-  fun setup(server: MockWebServer) {
-    this.server = server
+  fun setup() {
     platform.assumeNotBouncyCastle()
   }
 
@@ -66,7 +67,7 @@ class CertificatePinnerChainValidationTest {
    */
   @Test
   fun pinRootNotPresentInChain() {
-    // Fails on 11.0.1 https://github.com/square/okhttp/issues/4703
+    // Fails on 11.0.1 https://github.com/lysine-dev/okhttp/issues/4703
     val rootCa =
       HeldCertificate
         .Builder()
@@ -138,7 +139,7 @@ class CertificatePinnerChainValidationTest {
    */
   @Test
   fun pinIntermediatePresentInChain() {
-    // Fails on 11.0.1 https://github.com/square/okhttp/issues/4703
+    // Fails on 11.0.1 https://github.com/lysine-dev/okhttp/issues/4703
     val rootCa =
       HeldCertificate
         .Builder()
@@ -192,7 +193,7 @@ class CertificatePinnerChainValidationTest {
       MockResponse
         .Builder()
         .body("abc")
-        .socketPolicy(DisconnectAtEnd)
+        .onResponseEnd(ShutdownConnection)
         .build(),
     )
     val call1 =
@@ -214,7 +215,7 @@ class CertificatePinnerChainValidationTest {
       MockResponse
         .Builder()
         .body("def")
-        .socketPolicy(DisconnectAtEnd)
+        .onResponseEnd(ShutdownConnection)
         .build(),
     )
     val call2 =
@@ -231,7 +232,7 @@ class CertificatePinnerChainValidationTest {
 
   @Test
   fun unrelatedPinnedLeafCertificateInChain() {
-    // https://github.com/square/okhttp/issues/4729
+    // https://github.com/lysine-dev/okhttp/issues/4729
     platform.expectFailureOnConscryptPlatform()
     platform.expectFailureOnCorrettoPlatform()
     platform.expectFailureOnLoomPlatform()
@@ -335,7 +336,7 @@ class CertificatePinnerChainValidationTest {
 
   @Test
   fun unrelatedPinnedIntermediateCertificateInChain() {
-    // https://github.com/square/okhttp/issues/4729
+    // https://github.com/lysine-dev/okhttp/issues/4729
     platform.expectFailureOnConscryptPlatform()
     platform.expectFailureOnCorrettoPlatform()
     platform.expectFailureOnLoomPlatform()
@@ -438,11 +439,15 @@ class CertificatePinnerChainValidationTest {
           // On Android, the handshake fails before the certificate pinner runs.
           assertThat(expected.message!!).contains("Could not validate certificate")
         }
+
         is SSLPeerUnverifiedException -> {
           // On OpenJDK, the handshake succeeds but the certificate pinner fails.
           assertThat(expected.message!!).startsWith("Certificate pinning failure!")
         }
-        else -> throw expected
+
+        else -> {
+          throw expected
+        }
       }
     }
   }
@@ -598,11 +603,15 @@ class CertificatePinnerChainValidationTest {
           // Certificate pinning fails!
           assertThat(expected.message!!).startsWith("Certificate pinning failure!")
         }
+
         is SSLHandshakeException -> {
           // We didn't have the opportunity to do certificate pinning because the handshake failed.
           assertThat(expected.message!!).contains("this is not a CA certificate")
         }
-        else -> throw expected
+
+        else -> {
+          throw expected
+        }
       }
     }
   }

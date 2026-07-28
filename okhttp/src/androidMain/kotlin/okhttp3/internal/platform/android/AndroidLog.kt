@@ -104,8 +104,18 @@ object AndroidLog {
   }
 
   fun enable() {
-    for ((logger, tag) in knownLoggers) {
-      enableLogging(logger, tag)
+    try {
+      for ((logger, tag) in knownLoggers) {
+        enableLogging(logger, tag)
+      }
+    } catch (re: RuntimeException) {
+      // Happens with non-robolectric unit tests
+      System.err.println("Possibly running android unit test without robolectric")
+      re.printStackTrace()
+    } catch (ule: UnsatisfiedLinkError) {
+      // Happens with Paparazzi - with Android classes on the classpath
+      System.err.println("Possibly running android unit test without robolectric")
+      ule.printStackTrace()
     }
   }
 

@@ -24,6 +24,7 @@ import javax.net.ssl.SSLSocket
 import javax.net.ssl.SSLSocketFactory
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.junit5.StartStop
 import okhttp3.TestUtil.assumeNetwork
 import okhttp3.internal.connection
 import okhttp3.testing.PlatformRule
@@ -47,12 +48,11 @@ class JSSETest {
 
   var client = clientTestRule.newClient()
 
-  private lateinit var server: MockWebServer
+  @StartStop
+  private val server = MockWebServer()
 
   @BeforeEach
-  fun setUp(server: MockWebServer) {
-    this.server = server
-
+  fun setUp() {
     // Default after JDK 14, but we are avoiding tests that assume special setup.
     // System.setProperty("jdk.tls.client.enableSessionTicketExtension", "true")
     // System.setProperty("jdk.tls.server.enableSessionTicketExtension", "true")
@@ -100,29 +100,36 @@ class JSSETest {
     val s = factory.createSocket() as SSLSocket
 
     when {
-      PlatformVersion.majorVersion > 11 ->
+      PlatformVersion.majorVersion > 11 -> {
         assertThat(s.enabledProtocols.toList()).containsExactly(
           "TLSv1.3",
           "TLSv1.2",
         )
+      }
+
       // Not much we can guarantee on JDK 11.
-      PlatformVersion.majorVersion == 11 ->
+      PlatformVersion.majorVersion == 11 -> {
         assertThat(s.enabledProtocols.toList()).contains(
           "TLSv1.2",
         )
+      }
+
       // JDK 8 291 removed older versions
       // See https://java.com/en/jre-jdk-cryptoroadmap.html
-      PlatformVersion.majorVersion == 8 ->
+      PlatformVersion.majorVersion == 8 -> {
         assertThat(s.enabledProtocols.toList()).contains(
           "TLSv1.2",
         )
-      else ->
+      }
+
+      else -> {
         assertThat(s.enabledProtocols.toList()).containsExactly(
           "TLSv1.3",
           "TLSv1.2",
           "TLSv1.1",
           "TLSv1",
         )
+      }
     }
   }
 

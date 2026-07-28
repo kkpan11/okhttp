@@ -17,10 +17,12 @@ package okhttp3
 
 import assertk.assertThat
 import assertk.assertions.containsExactly
+import assertk.assertions.isEqualTo
 import assertk.assertions.isIn
 import javax.net.ssl.SSLSocket
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.junit5.StartStop
 import okhttp3.CipherSuite.Companion.TLS_AES_128_GCM_SHA256
 import okhttp3.CipherSuite.Companion.TLS_AES_256_GCM_SHA384
 import okhttp3.CipherSuite.Companion.TLS_CHACHA20_POLY1305_SHA256
@@ -40,7 +42,9 @@ import org.junit.jupiter.api.extension.RegisterExtension
 
 class CallHandshakeTest {
   private lateinit var client: OkHttpClient
-  private lateinit var server: MockWebServer
+
+  @StartStop
+  private val server = MockWebServer()
 
   @RegisterExtension
   @JvmField
@@ -66,9 +70,7 @@ class CallHandshakeTest {
   val expectedModernTls13CipherSuites = listOf(TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256, TLS_AES_128_GCM_SHA256, TLS_AES_256_GCM_SHA384)
 
   @BeforeEach
-  fun setup(server: MockWebServer) {
-    this.server = server
-
+  fun setup() {
     server.enqueue(MockResponse())
 
     client =
@@ -109,6 +111,7 @@ class CallHandshakeTest {
     assertThat(handshakeEnabledCipherSuites).containsExactly(
       *expectedConnectionCipherSuites(client).toTypedArray(),
     )
+    assertThat(handshake.tlsVersion).isEqualTo(TlsVersion.TLS_1_2)
   }
 
   @Test
@@ -139,6 +142,7 @@ class CallHandshakeTest {
     assertThat(handshakeEnabledCipherSuites).containsExactly(
       *expectedConnectionCipherSuites(client).toTypedArray(),
     )
+    assertThat(handshake.tlsVersion).isEqualTo(TlsVersion.TLS_1_2)
   }
 
   @Test
@@ -169,6 +173,7 @@ class CallHandshakeTest {
     assertThat(handshakeEnabledCipherSuites).containsExactly(
       *expectedConnectionCipherSuites(client).toTypedArray(),
     )
+    assertThat(handshake.tlsVersion).isEqualTo(TlsVersion.TLS_1_3)
   }
 
   @Test

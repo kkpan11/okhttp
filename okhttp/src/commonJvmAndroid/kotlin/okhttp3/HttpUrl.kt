@@ -26,8 +26,8 @@ import okhttp3.internal.delimiterOffset
 import okhttp3.internal.indexOfFirstNonAsciiWhitespace
 import okhttp3.internal.indexOfLastNonAsciiWhitespace
 import okhttp3.internal.publicsuffix.PublicSuffixDatabase
-import okhttp3.internal.readOnly
 import okhttp3.internal.toCanonicalHost
+import okhttp3.internal.unmodifiable
 import okhttp3.internal.url.FRAGMENT_ENCODE_SET
 import okhttp3.internal.url.FRAGMENT_ENCODE_SET_URI
 import okhttp3.internal.url.PASSWORD_ENCODE_SET
@@ -131,7 +131,7 @@ import okhttp3.internal.url.percentDecode
  * ### Path
  *
  * The path identifies a specific resource on the host. Paths have a hierarchical structure like
- * "/square/okhttp/issues/1486" and decompose into a list of segments like `["square", "okhttp",
+ * "/lysine-dev/okhttp/issues/1486" and decompose into a list of segments like `["square", "okhttp",
  * "issues", "1486"]`.
  *
  * This class offers methods to compose and decompose paths by segment. It composes each path
@@ -617,11 +617,11 @@ class HttpUrl private constructor(
   val queryParameterNames: Set<String>
     get() {
       if (queryNamesAndValues == null) return emptySet()
-      val result = LinkedHashSet<String>()
+      val result = LinkedHashSet<String>(queryNamesAndValues.size / 2, 1.0F)
       for (i in 0 until queryNamesAndValues.size step 2) {
         result.add(queryNamesAndValues[i]!!)
       }
-      return result.readOnly()
+      return result.unmodifiable()
     }
 
   /**
@@ -639,13 +639,13 @@ class HttpUrl private constructor(
    */
   fun queryParameterValues(name: String): List<String?> {
     if (queryNamesAndValues == null) return emptyList()
-    val result = mutableListOf<String?>()
+    val result = ArrayList<String?>(4)
     for (i in 0 until queryNamesAndValues.size step 2) {
       if (name == queryNamesAndValues[i]) {
         result.add(queryNamesAndValues[i + 1])
       }
     }
-    return result.readOnly()
+    return result.unmodifiable()
   }
 
   /**
@@ -1344,14 +1344,18 @@ class HttpUrl private constructor(
             this.scheme = "https"
             pos += "https:".length
           }
+
           input.startsWith("http:", ignoreCase = true, startIndex = pos) -> {
             this.scheme = "http"
             pos += "http:".length
           }
-          else -> throw IllegalArgumentException(
-            "Expected URL scheme 'http' or 'https' but was '" +
-              input.substring(0, schemeDelimiterOffset) + "'",
-          )
+
+          else -> {
+            throw IllegalArgumentException(
+              "Expected URL scheme 'http' or 'https' but was '" +
+                input.substring(0, schemeDelimiterOffset) + "'",
+            )
+          }
         }
       } else if (base != null) {
         this.scheme = base.scheme
@@ -1678,7 +1682,10 @@ class HttpUrl private constructor(
               if (input[i] == ']') break
             }
           }
-          ':' -> return i
+
+          ':' -> {
+            return i
+          }
         }
         i++
       }

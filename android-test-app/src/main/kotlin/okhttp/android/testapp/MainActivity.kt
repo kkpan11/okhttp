@@ -26,7 +26,7 @@ import okhttp3.Response
 import okhttp3.internal.platform.AndroidPlatform
 import okio.IOException
 
-class MainActivity : ComponentActivity() {
+open class MainActivity : ComponentActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
 
@@ -35,7 +35,7 @@ class MainActivity : ComponentActivity() {
     // Ensure we are compiling against the right variant
     println(AndroidPlatform.isSupported)
 
-    val url = "https://github.com/square/okhttp".toHttpUrl()
+    val url = "https://github.com/lysine-dev/okhttp".toHttpUrl()
     println(url.topPrivateDomain())
 
     client.newCall(Request(url)).enqueue(

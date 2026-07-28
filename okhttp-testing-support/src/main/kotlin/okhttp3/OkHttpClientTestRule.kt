@@ -13,7 +13,11 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
+@file:Suppress(
+  "CANNOT_OVERRIDE_INVISIBLE_MEMBER",
+  "INVISIBLE_MEMBER",
+  "INVISIBLE_REFERENCE",
+)
 
 package okhttp3
 
@@ -25,9 +29,10 @@ import java.util.logging.Level
 import java.util.logging.LogManager
 import java.util.logging.LogRecord
 import java.util.logging.Logger
+import okhttp3.OkHttpClientTestRule.Companion.plus
 import okhttp3.internal.buildConnectionPool
 import okhttp3.internal.concurrent.TaskRunner
-import okhttp3.internal.connection.Locks.withLock
+import okhttp3.internal.concurrent.withLock
 import okhttp3.internal.connection.RealConnectionPool
 import okhttp3.internal.http2.Http2
 import okhttp3.internal.taskRunnerInternal
@@ -56,7 +61,7 @@ class OkHttpClientTestRule :
   private lateinit var testName: String
   private var defaultUncaughtExceptionHandler: Thread.UncaughtExceptionHandler? = null
   private var taskQueuesWereIdle: Boolean = false
-  val connectionListener = RecordingConnectionListener()
+  private val connectionListener = RecordingConnectionListener()
 
   var logger: Logger? = null
 
@@ -128,10 +133,17 @@ class OkHttpClientTestRule :
     Logger.getLogger("javax.net.ssl").fn()
   }
 
-  fun wrap(eventListener: EventListener) = EventListener.Factory { ClientRuleEventListener(eventListener, ::addEvent) }
+  fun wrap(eventListener: EventListener) =
+    EventListener.Factory {
+      ClientRuleEventListener(::addEvent) + eventListener
+    }
+
+  fun wrap(eventRecorder: EventRecorder) = wrap(eventRecorder.eventListener)
 
   fun wrap(eventListenerFactory: EventListener.Factory) =
-    EventListener.Factory { call -> ClientRuleEventListener(eventListenerFactory.create(call), ::addEvent) }
+    EventListener.Factory { call ->
+      ClientRuleEventListener(::addEvent) + eventListenerFactory.create(call)
+    }
 
   /**
    * Returns an OkHttpClient for tests to use as a starting point.
@@ -205,6 +217,10 @@ class OkHttpClientTestRule :
       uncaughtException = throwable
     }
   }
+
+  @Synchronized fun takeUncaughtException(): Throwable? =
+    uncaughtException
+      .also { uncaughtException = null }
 
   fun ensureAllConnectionsReleased() {
     testClient?.let {

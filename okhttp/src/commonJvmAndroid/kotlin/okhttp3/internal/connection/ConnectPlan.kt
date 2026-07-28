@@ -18,9 +18,10 @@ package okhttp3.internal.connection
 import java.io.IOException
 import java.net.ConnectException
 import java.net.HttpURLConnection
+import java.net.NoRouteToHostException
 import java.net.ProtocolException
 import java.net.Proxy
-import java.net.Socket
+import java.net.Socket as JavaNetSocket
 import java.net.UnknownServiceException
 import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
@@ -35,18 +36,13 @@ import okhttp3.Request
 import okhttp3.Route
 import okhttp3.internal.closeQuietly
 import okhttp3.internal.concurrent.TaskRunner
-import okhttp3.internal.connection.Locks.withLock
+import okhttp3.internal.concurrent.withLock
 import okhttp3.internal.connection.RoutePlanner.ConnectResult
 import okhttp3.internal.http.ExchangeCodec
 import okhttp3.internal.http1.Http1ExchangeCodec
 import okhttp3.internal.platform.Platform
 import okhttp3.internal.tls.OkHostnameVerifier
 import okhttp3.internal.toHostHeader
-import okio.BufferedSink
-import okio.BufferedSource
-import okio.buffer
-import okio.sink
-import okio.source
 
 /**
  * A single attempt to connect to a remote server, including these steps:
@@ -59,7 +55,7 @@ import okio.source
  * Each step may fail. If a retry is possible, a new instance is created with the next plan, which
  * will be configured differently.
  */
-class ConnectPlan(
+class ConnectPlan internal constructor(
   private val taskRunner: TaskRunner,
   private val connectionPool: RealConnectionPool,
   private val readTimeoutMillis: Int,
@@ -68,7 +64,7 @@ class ConnectPlan(
   private val socketReadTimeoutMillis: Int,
   private val pingIntervalMillis: Int,
   private val retryOnConnectionFailure: Boolean,
-  private val user: ConnectionUser,
+  private val call: RealCall,
   private val routePlanner: RealRoutePlanner,
   // Specifics to this plan.
   override val route: Route,
@@ -85,17 +81,16 @@ class ConnectPlan(
   // These properties are initialized by connect() and never reassigned.
 
   /** The low-level TCP socket. */
-  private var rawSocket: Socket? = null
+  private var rawSocket: JavaNetSocket? = null
 
   /**
    * The application layer socket. Either an [SSLSocket] layered over [rawSocket], or [rawSocket]
    * itself if this connection does not use SSL.
    */
-  internal var socket: Socket? = null
+  internal var javaNetSocket: JavaNetSocket? = null
   private var handshake: Handshake? = null
   private var protocol: Protocol? = null
-  private lateinit var source: BufferedSource
-  private lateinit var sink: BufferedSink
+  private lateinit var socket: BufferedSocket
   private var connection: RealConnection? = null
 
   /** True if this connection is ready for use, including TCP, tunnels, and TLS. */
@@ -117,7 +112,7 @@ class ConnectPlan(
       socketReadTimeoutMillis = socketReadTimeoutMillis,
       pingIntervalMillis = pingIntervalMillis,
       retryOnConnectionFailure = retryOnConnectionFailure,
-      user = user,
+      call = call,
       routePlanner = routePlanner,
       route = route,
       routes = routes,
@@ -133,9 +128,10 @@ class ConnectPlan(
     var success = false
 
     // Tell the call about the connecting call so async cancels work.
-    user.addPlanToCancel(this)
+    call.plansToCancel += this
     try {
-      user.connectStart(route)
+      call.eventListener.connectStart(call, route.socketAddress, route.proxy)
+      connectionPool.connectionListener.connectStart(route, call)
 
       connectSocket()
       success = true
@@ -149,10 +145,11 @@ class ConnectPlan(
           e,
         )
       }
-      user.connectFailed(route, null, e)
+      call.eventListener.connectFailed(call, route.socketAddress, route.proxy, null, e)
+      connectionPool.connectionListener.connectFailed(route, call, e)
       return ConnectResult(plan = this, throwable = e)
     } finally {
-      user.removePlanToCancel(this)
+      call.plansToCancel -= this
       if (!success) {
         rawSocket?.closeQuietly()
       }
@@ -168,7 +165,7 @@ class ConnectPlan(
     var success = false
 
     // Tell the call about the connecting call so async cancels work.
-    user.addPlanToCancel(this)
+    call.plansToCancel += this
     try {
       if (tunnelRequest != null) {
         val tunnelResult = connectTunnel()
@@ -184,11 +181,11 @@ class ConnectPlan(
         // that happens, then we will have buffered bytes that are needed by the SSLSocket!
         // This check is imperfect: it doesn't tell us whether a handshake will succeed, just
         // that it will almost certainly fail because the proxy has sent unexpected data.
-        if (!source.buffer.exhausted() || !sink.buffer.exhausted()) {
+        if (!socket.source.buffer.exhausted() || !socket.sink.buffer.exhausted()) {
           throw IOException("TLS tunnel buffered too many bytes!")
         }
 
-        user.secureConnectStart()
+        call.eventListener.secureConnectStart(call)
 
         // Create the wrapper over the connected socket.
         val sslSocket =
@@ -208,9 +205,9 @@ class ConnectPlan(
 
         connectionSpec.apply(sslSocket, isFallback = tlsEquipPlan.isTlsFallback)
         connectTls(sslSocket, connectionSpec)
-        user.secureConnectEnd(handshake)
+        call.eventListener.secureConnectEnd(call, handshake)
       } else {
-        socket = rawSocket
+        javaNetSocket = rawSocket
         protocol =
           when {
             Protocol.H2_PRIOR_KNOWLEDGE in route.address.protocols -> Protocol.H2_PRIOR_KNOWLEDGE
@@ -224,11 +221,10 @@ class ConnectPlan(
           connectionPool = connectionPool,
           route = route,
           rawSocket = rawSocket,
-          socket = socket!!,
+          javaNetSocket = javaNetSocket!!,
           handshake = handshake,
           protocol = protocol!!,
-          source = source,
-          sink = sink,
+          socket = socket,
           pingIntervalMillis = pingIntervalMillis,
           connectionListener = connectionPool.connectionListener,
         )
@@ -236,11 +232,12 @@ class ConnectPlan(
       connection.start()
 
       // Success.
-      user.callConnectEnd(route, protocol)
+      call.eventListener.connectEnd(call, route.socketAddress, route.proxy, protocol)
       success = true
       return ConnectResult(plan = this)
     } catch (e: IOException) {
-      user.connectFailed(route, null, e)
+      call.eventListener.connectFailed(call, route.socketAddress, route.proxy, null, e)
+      connectionPool.connectionListener.connectFailed(route, call, e)
 
       if (!retryOnConnectionFailure || !retryTlsHandshake(e)) {
         retryTlsConnection = null
@@ -252,9 +249,9 @@ class ConnectPlan(
         throwable = e,
       )
     } finally {
-      user.removePlanToCancel(this)
+      call.plansToCancel -= this
       if (!success) {
-        socket?.closeQuietly()
+        javaNetSocket?.closeQuietly()
         rawSocket.closeQuietly()
       }
     }
@@ -266,7 +263,7 @@ class ConnectPlan(
     val rawSocket =
       when (route.proxy.type()) {
         Proxy.Type.DIRECT, Proxy.Type.HTTP -> route.address.socketFactory.createSocket()!!
-        else -> Socket(route.proxy)
+        else -> JavaNetSocket(route.proxy)
       }
     this.rawSocket = rawSocket
 
@@ -286,11 +283,10 @@ class ConnectPlan(
 
     // The following try/catch block is a pseudo hacky way to get around a crash on Android 7.0
     // More details:
-    // https://github.com/square/okhttp/issues/3245
+    // https://github.com/lysine-dev/okhttp/issues/3245
     // https://android-review.googlesource.com/#/c/271775/
     try {
-      source = rawSocket.source().buffer()
-      sink = rawSocket.sink().buffer()
+      this.socket = rawSocket.asBufferedSocket()
     } catch (npe: NullPointerException) {
       if (npe.message == NPE_THROW_WITH_NULL) {
         throw IOException(npe)
@@ -318,7 +314,7 @@ class ConnectPlan(
     val nextAttempt = attempt + 1
     return when {
       nextAttempt < MAX_TUNNEL_ATTEMPTS -> {
-        user.callConnectEnd(route, null)
+        call.eventListener.connectEnd(call, route.socketAddress, route.proxy, null)
         ConnectResult(
           plan = this,
           nextPlan =
@@ -328,12 +324,14 @@ class ConnectPlan(
             ),
         )
       }
+
       else -> {
         val failure =
           ProtocolException(
             "Too many tunnel connections attempted: $MAX_TUNNEL_ATTEMPTS",
           )
-        user.connectFailed(route, null, failure)
+        call.eventListener.connectFailed(call, route.socketAddress, route.proxy, null, failure)
+        connectionPool.connectionListener.connectFailed(route, call, failure)
         return ConnectResult(plan = this, throwable = failure)
       }
     }
@@ -348,7 +346,12 @@ class ConnectPlan(
     var success = false
     try {
       if (connectionSpec.supportsTlsExtensions) {
-        Platform.get().configureTlsExtensions(sslSocket, address.url.host, address.protocols)
+        Platform.get().configureTlsExtensions(
+          sslSocket = sslSocket,
+          hostname = address.url.host,
+          protocols = address.protocols,
+          echConfigList = route.echConfigList,
+        )
       }
 
       // Force handshake. This can throw!
@@ -404,9 +407,8 @@ class ConnectPlan(
         } else {
           null
         }
-      socket = sslSocket
-      source = sslSocket.source().buffer()
-      sink = sslSocket.sink().buffer()
+      javaNetSocket = sslSocket
+      socket = sslSocket.asBufferedSocket()
       protocol = if (maybeProtocol != null) Protocol.get(maybeProtocol) else Protocol.HTTP_1_1
       success = true
     } finally {
@@ -433,11 +435,10 @@ class ConnectPlan(
           // No client for CONNECT tunnels:
           client = null,
           carrier = this,
-          source = source,
-          sink = sink,
+          socket = socket,
         )
-      source.timeout().timeout(readTimeoutMillis.toLong(), TimeUnit.MILLISECONDS)
-      sink.timeout().timeout(writeTimeoutMillis.toLong(), TimeUnit.MILLISECONDS)
+      socket.source.timeout().timeout(readTimeoutMillis.toLong(), TimeUnit.MILLISECONDS)
+      socket.sink.timeout().timeout(writeTimeoutMillis.toLong(), TimeUnit.MILLISECONDS)
       tunnelCodec.writeRequest(nextRequest.headers, requestLine)
       tunnelCodec.finishRequest()
       val response =
@@ -448,7 +449,9 @@ class ConnectPlan(
       tunnelCodec.skipConnectBody(response)
 
       when (response.code) {
-        HttpURLConnection.HTTP_OK -> return null
+        HttpURLConnection.HTTP_OK -> {
+          return null
+        }
 
         HttpURLConnection.HTTP_PROXY_AUTH -> {
           nextRequest = route.address.proxyAuthenticator.authenticate(route, response)
@@ -459,7 +462,9 @@ class ConnectPlan(
           }
         }
 
-        else -> throw IOException("Unexpected response code for CONNECT: ${response.code}")
+        else -> {
+          throw IOException("Unexpected response code for CONNECT: ${response.code}")
+        }
       }
     }
   }
@@ -501,10 +506,10 @@ class ConnectPlan(
 
   /** Returns the connection to use, which might be different from [connection]. */
   override fun handleSuccess(): RealConnection {
-    user.updateRouteDatabaseAfterSuccess(route)
+    call.client.routeDatabase.connected(route)
 
     val connection = this.connection!!
-    user.connectionConnectEnd(connection, route)
+    connection.connectionListener.connectEnd(connection, route, call)
 
     // If we raced another call connecting to this host, coalesce the connections. This makes for
     // 3 different lookups in the connection pool!
@@ -513,11 +518,11 @@ class ConnectPlan(
 
     connection.withLock {
       connectionPool.put(connection)
-      user.acquireConnectionNoEvents(connection)
+      call.acquireConnectionNoEvents(connection)
     }
 
-    user.connectionAcquired(connection)
-    user.connectionConnectionAcquired(connection)
+    call.eventListener.connectionAcquired(call, connection)
+    connection.connectionListener.connectionAcquired(connection, call)
     return connection
   }
 
@@ -548,7 +553,7 @@ class ConnectPlan(
       socketReadTimeoutMillis = socketReadTimeoutMillis,
       pingIntervalMillis = pingIntervalMillis,
       retryOnConnectionFailure = retryOnConnectionFailure,
-      user = user,
+      call = call,
       routePlanner = routePlanner,
       route = route,
       routes = routes,
@@ -559,7 +564,7 @@ class ConnectPlan(
     )
 
   fun closeQuietly() {
-    socket?.closeQuietly()
+    javaNetSocket?.closeQuietly()
   }
 
   companion object {

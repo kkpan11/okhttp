@@ -22,7 +22,7 @@ import assertk.assertions.isInstanceOf
 import assertk.assertions.isNotInstanceOf
 import assertk.assertions.isNotNull
 import assertk.assertions.isNull
-import assertk.assertions.isSameAs
+import assertk.assertions.isSameInstanceAs
 import java.io.IOException
 import java.net.CookieManager
 import java.net.Proxy
@@ -37,6 +37,7 @@ import javax.net.ssl.SSLSocketFactory
 import kotlin.test.assertFailsWith
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.junit5.StartStop
 import okhttp3.internal.platform.Platform.Companion.get
 import okhttp3.internal.proxy.NullProxySelector
 import okhttp3.testing.PlatformRule
@@ -44,7 +45,6 @@ import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotSame
 import org.junit.jupiter.api.Assertions.assertSame
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.RegisterExtension
 
@@ -55,11 +55,8 @@ class OkHttpClientTest {
   @RegisterExtension
   val clientTestRule = OkHttpClientTestRule()
 
-  private var server: MockWebServer? = null
-
-  @BeforeEach fun setUp(server: MockWebServer?) {
-    this.server = server
-  }
+  @StartStop
+  private val server = MockWebServer()
 
   @AfterEach fun tearDown() {
     ProxySelector.setDefault(DEFAULT_PROXY_SELECTOR)
@@ -149,10 +146,10 @@ class OkHttpClientTest {
 
     // Multiple clients share the instances.
     val b = client.newBuilder().build()
-    assertThat(b.dispatcher).isSameAs(a.dispatcher)
-    assertThat(b.connectionPool).isSameAs(a.connectionPool)
-    assertThat(b.sslSocketFactory).isSameAs(a.sslSocketFactory)
-    assertThat(b.x509TrustManager).isSameAs(a.x509TrustManager)
+    assertThat(b.dispatcher).isSameInstanceAs(a.dispatcher)
+    assertThat(b.connectionPool).isSameInstanceAs(a.connectionPool)
+    assertThat(b.sslSocketFactory).isSameInstanceAs(a.sslSocketFactory)
+    assertThat(b.x509TrustManager).isSameInstanceAs(a.x509TrustManager)
   }
 
   @Test fun setProtocolsRejectsHttp10() {
@@ -318,7 +315,7 @@ class OkHttpClientTest {
         .Builder()
         .proxy(Proxy.NO_PROXY)
         .build()
-    assertThat(client.proxy).isSameAs(Proxy.NO_PROXY)
+    assertThat(client.proxy).isSameInstanceAs(Proxy.NO_PROXY)
     assertThat(client.proxySelector)
       .isInstanceOf(NullProxySelector::class.java)
     client =

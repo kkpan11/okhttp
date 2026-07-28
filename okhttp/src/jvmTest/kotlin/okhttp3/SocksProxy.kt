@@ -23,7 +23,6 @@ import java.net.Proxy
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.SocketException
-import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -50,7 +49,7 @@ class SocksProxy {
   private val executor = Executors.newCachedThreadPool(threadFactory("SocksProxy"))
   private var serverSocket: ServerSocket? = null
   private val connectionCount = AtomicInteger()
-  private val openSockets = Collections.newSetFromMap(ConcurrentHashMap<Socket, Boolean>())
+  private val openSockets: MutableSet<Socket> = ConcurrentHashMap.newKeySet()
 
   fun play() {
     serverSocket = ServerSocket(0)
@@ -130,7 +129,10 @@ class SocksProxy {
         fromSink.writeByte(selectedMethod)
         fromSink.emit()
       }
-      else -> throw ProtocolException("unsupported method: $selectedMethod")
+
+      else -> {
+        throw ProtocolException("unsupported method: $selectedMethod")
+      }
     }
   }
 
@@ -163,11 +165,16 @@ class SocksProxy {
             domainName.equals(HOSTNAME_THAT_ONLY_THE_PROXY_KNOWS, ignoreCase = true) -> {
               InetAddress.getByName("localhost")
             }
-            else -> InetAddress.getByName(domainName)
+
+            else -> {
+              InetAddress.getByName(domainName)
+            }
           }
         }
 
-        else -> throw ProtocolException("unsupported address type: $addressType")
+        else -> {
+          throw ProtocolException("unsupported address type: $addressType")
+        }
       }
 
     val port = fromSource.readShort() and 0xffff
@@ -198,7 +205,9 @@ class SocksProxy {
         transfer(fromAddress, toAddress, toSource, fromSink)
       }
 
-      else -> throw ProtocolException("unexpected command: $command")
+      else -> {
+        throw ProtocolException("unexpected command: $command")
+      }
     }
   }
 

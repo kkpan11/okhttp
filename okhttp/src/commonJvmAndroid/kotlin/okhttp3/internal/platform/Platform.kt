@@ -31,14 +31,17 @@ import javax.net.ssl.SSLSocketFactory
 import javax.net.ssl.TrustManager
 import javax.net.ssl.TrustManagerFactory
 import javax.net.ssl.X509TrustManager
+import okhttp3.Dns
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
+import okhttp3.internal.publicsuffix.PublicSuffixDatabase
 import okhttp3.internal.readFieldOrNull
 import okhttp3.internal.tls.BasicCertificateChainCleaner
 import okhttp3.internal.tls.BasicTrustRootIndex
 import okhttp3.internal.tls.CertificateChainCleaner
 import okhttp3.internal.tls.TrustRootIndex
 import okio.Buffer
+import okio.ByteString
 import org.codehaus.mojo.animal_sniffer.IgnoreJRERequirement
 
 /**
@@ -115,6 +118,7 @@ open class Platform {
     sslSocket: SSLSocket,
     hostname: String?,
     protocols: List<@JvmSuppressWildcards Protocol>,
+    echConfigList: ByteString?,
   ) {
   }
 
@@ -126,17 +130,23 @@ open class Platform {
   open fun getSelectedProtocol(sslSocket: SSLSocket): String? = null
 
   /** For MockWebServer. This returns the inbound SNI names. */
+  @Suppress("NewApi")
   @IgnoreJRERequirement // This function is overridden to require API >= 24.
   open fun getHandshakeServerNames(sslSocket: SSLSocket): List<String> {
     val session = sslSocket.session as? ExtendedSSLSession ?: return listOf()
     return try {
       session.requestedServerNames.mapNotNull { (it as? SNIHostName)?.asciiName }
-    } catch (uoe: UnsupportedOperationException) {
+    } catch (_: UnsupportedOperationException) {
       // UnsupportedOperationException – if the underlying provider does not implement the operation
       // https://github.com/bcgit/bc-java/issues/1773
       listOf()
     }
   }
+
+  /**
+   * Provides the default [Dns] for the system, by default [Dns.SYSTEM].
+   */
+  open fun platformDns(): Dns = Dns.SYSTEM
 
   @Throws(IOException::class)
   open fun connectSocket(
@@ -165,7 +175,9 @@ open class Platform {
    */
   open fun getStackTraceForCloseable(closer: String): Any? =
     when {
-      logger.isLoggable(Level.FINE) -> Throwable(closer) // These are expensive to allocate.
+      logger.isLoggable(Level.FINE) -> Throwable(closer)
+
+      // These are expensive to allocate.
       else -> null
     }
 
@@ -212,6 +224,7 @@ open class Platform {
 
     fun resetForTests(platform: Platform = findPlatform()) {
       this.platform = platform
+      PublicSuffixDatabase.resetForTests()
     }
 
     fun alpnProtocolNames(protocols: List<Protocol>) = protocols.filter { it != Protocol.HTTP_1_0 }.map { it.toString() }

@@ -1,6 +1,9 @@
 plugins {
   kotlin("jvm")
-  id("com.github.johnrengelman.shadow")
+  id("okhttp.jvm-conventions")
+  id("okhttp.quality-conventions")
+  id("okhttp.testing-conventions")
+  id("com.gradleup.shadow")
 }
 
 tasks.compileJava {
@@ -14,6 +17,7 @@ tasks.jar {
 }
 
 dependencies {
+  implementation(projects.okhttp)
   implementation(projects.mockwebserver)
 }
 

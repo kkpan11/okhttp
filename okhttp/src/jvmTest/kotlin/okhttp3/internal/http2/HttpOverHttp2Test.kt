@@ -15,6 +15,8 @@
  */
 package okhttp3.internal.http2
 
+import app.cash.burst.Burst
+import app.cash.burst.burstValues
 import assertk.assertThat
 import assertk.assertions.contains
 import assertk.assertions.hasMessage
@@ -45,10 +47,10 @@ import mockwebserver3.MockWebServer
 import mockwebserver3.PushPromise
 import mockwebserver3.QueueDispatcher
 import mockwebserver3.RecordedRequest
-import mockwebserver3.SocketPolicy.DisconnectAtEnd
-import mockwebserver3.SocketPolicy.NoResponse
-import mockwebserver3.SocketPolicy.ResetStreamAtStart
-import mockwebserver3.SocketPolicy.StallSocketAtStart
+import mockwebserver3.SocketEffect.CloseStream
+import mockwebserver3.SocketEffect.ShutdownConnection
+import mockwebserver3.SocketEffect.Stall
+import mockwebserver3.junit5.StartStop
 import okhttp3.Cache
 import okhttp3.Call
 import okhttp3.Callback
@@ -70,7 +72,6 @@ import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.Response
 import okhttp3.Route
-import okhttp3.SimpleProvider
 import okhttp3.TestLogHandler
 import okhttp3.TestUtil.assumeNotWindows
 import okhttp3.TestUtil.repeat
@@ -91,22 +92,21 @@ import okio.fakefilesystem.FakeFileSystem
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Assertions.assertArrayEquals
 import org.junit.jupiter.api.Assumptions.assumeTrue
+import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Disabled
 import org.junit.jupiter.api.Tag
+import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.extension.RegisterExtension
-import org.junit.jupiter.params.ParameterizedTest
-import org.junit.jupiter.params.provider.ArgumentsSource
 
 /** Test how HTTP/2 interacts with HTTP features.  */
 @Timeout(60)
 @Flaky
 @Tag("Slow")
-class HttpOverHttp2Test {
-  class ProtocolParamProvider : SimpleProvider() {
-    override fun arguments() = listOf(Protocol.H2_PRIOR_KNOWLEDGE, Protocol.HTTP_2)
-  }
-
+@Burst
+class HttpOverHttp2Test(
+  val protocol: Protocol = burstValues(Protocol.H2_PRIOR_KNOWLEDGE, Protocol.HTTP_2),
+) {
   @RegisterExtension
   val platform: PlatformRule = PlatformRule()
 
@@ -116,13 +116,14 @@ class HttpOverHttp2Test {
   @RegisterExtension
   val testLogHandler: TestLogHandler = TestLogHandler(Http2::class.java)
 
-  // Flaky https://github.com/square/okhttp/issues/4632
-  // Flaky https://github.com/square/okhttp/issues/4633
+  // Flaky https://github.com/lysine-dev/okhttp/issues/4632
+  // Flaky https://github.com/lysine-dev/okhttp/issues/4633
   private val handshakeCertificates: HandshakeCertificates =
     platform.localhostHandshakeCertificates()
 
-  private lateinit var server: MockWebServer
-  private lateinit var protocol: Protocol
+  @StartStop
+  private val server = MockWebServer()
+
   private lateinit var client: OkHttpClient
   private val fileSystem: FakeFileSystem = FakeFileSystem()
   private val cache: Cache = Cache(fileSystem, "/tmp/cache".toPath(), Long.MAX_VALUE)
@@ -134,12 +135,8 @@ class HttpOverHttp2Test {
     return clientTestRule
   }
 
-  fun setUp(
-    protocol: Protocol,
-    server: MockWebServer,
-  ) {
-    this.server = server
-    this.protocol = protocol
+  @BeforeEach
+  fun setUp() {
     platform.assumeNotOpenJSSE()
     if (protocol === Protocol.HTTP_2) {
       platform.assumeHttp2Support()
@@ -166,20 +163,15 @@ class HttpOverHttp2Test {
   }
 
   @AfterEach fun tearDown() {
-//    TODO reenable after https://github.com/square/okhttp/issues/8206
+//    TODO reenable after https://github.com/lysine-dev/okhttp/issues/8206
 //    fileSystem.checkNoOpenFiles()
     cache.close()
 
     java.net.Authenticator.setDefault(null)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun get(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun get() {
     server.enqueue(MockResponse(body = "ABCDE"))
     val call = client.newCall(Request(server.url("/foo")))
     val response = call.execute()
@@ -188,18 +180,13 @@ class HttpOverHttp2Test {
     assertThat(response.message).isEqualTo("")
     assertThat(response.protocol).isEqualTo(protocol)
     val request = server.takeRequest()
-    assertThat(request.requestLine).isEqualTo("GET /foo HTTP/1.1")
+    assertThat(request.requestLine).isEqualTo("GET /foo HTTP/2")
     assertThat(request.headers[":scheme"]).isEqualTo(scheme)
     assertThat(request.headers[":authority"]).isEqualTo("${server.hostName}:${server.port}")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun get204Response(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun get204Response() {
     val responseWithoutBody =
       MockResponse
         .Builder()
@@ -218,16 +205,11 @@ class HttpOverHttp2Test {
     assertThat(response.header("content-length")).isNull()
     assertThat(response.code).isEqualTo(204)
     val request = server.takeRequest()
-    assertThat(request.requestLine).isEqualTo("GET /foo HTTP/1.1")
+    assertThat(request.requestLine).isEqualTo("GET /foo HTTP/2")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun head(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun head() {
     val mockResponse =
       MockResponse
         .Builder()
@@ -252,16 +234,11 @@ class HttpOverHttp2Test {
     // Content-Length header stays correctly.
     assertThat(response.header("content-length")).isEqualTo("5")
     val request = server.takeRequest()
-    assertThat(request.requestLine).isEqualTo("HEAD /foo HTTP/1.1")
+    assertThat(request.requestLine).isEqualTo("HEAD /foo HTTP/2")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun emptyResponse(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun emptyResponse() {
     server.enqueue(MockResponse())
     val call = client.newCall(Request(server.url("/foo")))
     val response = call.execute()
@@ -269,13 +246,8 @@ class HttpOverHttp2Test {
     response.body.close()
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun noDefaultContentLengthOnStreamingPost(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun noDefaultContentLengthOnStreamingPost() {
     val postBytes = "FGHIJ".toByteArray()
     server.enqueue(MockResponse(body = "ABCDE"))
     val call =
@@ -295,18 +267,13 @@ class HttpOverHttp2Test {
     val response = call.execute()
     assertThat(response.body.string()).isEqualTo("ABCDE")
     val request = server.takeRequest()
-    assertThat(request.requestLine).isEqualTo("POST /foo HTTP/1.1")
-    assertArrayEquals(postBytes, request.body.readByteArray())
+    assertThat(request.requestLine).isEqualTo("POST /foo HTTP/2")
+    assertArrayEquals(postBytes, request.body?.toByteArray())
     assertThat(request.headers["Content-Length"]).isNull()
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun userSuppliedContentLengthHeader(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun userSuppliedContentLengthHeader() {
     val postBytes = "FGHIJ".toByteArray()
     server.enqueue(MockResponse(body = "ABCDE"))
     val call =
@@ -328,18 +295,13 @@ class HttpOverHttp2Test {
     val response = call.execute()
     assertThat(response.body.string()).isEqualTo("ABCDE")
     val request = server.takeRequest()
-    assertThat(request.requestLine).isEqualTo("POST /foo HTTP/1.1")
-    assertArrayEquals(postBytes, request.body.readByteArray())
+    assertThat(request.requestLine).isEqualTo("POST /foo HTTP/2")
+    assertArrayEquals(postBytes, request.body?.toByteArray())
     assertThat(request.headers["Content-Length"]!!.toInt()).isEqualTo(postBytes.size)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun closeAfterFlush(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun closeAfterFlush() {
     val postBytes = "FGHIJ".toByteArray()
     server.enqueue(MockResponse(body = "ABCDE"))
     val call =
@@ -363,18 +325,13 @@ class HttpOverHttp2Test {
     val response = call.execute()
     assertThat(response.body.string()).isEqualTo("ABCDE")
     val request = server.takeRequest()
-    assertThat(request.requestLine).isEqualTo("POST /foo HTTP/1.1")
-    assertArrayEquals(postBytes, request.body.readByteArray())
+    assertThat(request.requestLine).isEqualTo("POST /foo HTTP/2")
+    assertArrayEquals(postBytes, request.body?.toByteArray())
     assertThat(request.headers["Content-Length"]!!.toInt()).isEqualTo(postBytes.size)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun connectionReuse(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun connectionReuse() {
     server.enqueue(MockResponse(body = "ABCDEF"))
     server.enqueue(MockResponse(body = "GHIJKL"))
     val call1 = client.newCall(Request(server.url("/r1")))
@@ -385,19 +342,18 @@ class HttpOverHttp2Test {
     assertThat(response2.body.source().readUtf8(3)).isEqualTo("GHI")
     assertThat(response1.body.source().readUtf8(3)).isEqualTo("DEF")
     assertThat(response2.body.source().readUtf8(3)).isEqualTo("JKL")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
+    val c0e0 = server.takeRequest()
+    assertThat(c0e0.connectionIndex).isEqualTo(0)
+    assertThat(c0e0.exchangeIndex).isEqualTo(0)
+    val c0e1 = server.takeRequest()
+    assertThat(c0e1.connectionIndex).isEqualTo(0)
+    assertThat(c0e1.exchangeIndex).isEqualTo(1)
     response1.close()
     response2.close()
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun connectionWindowUpdateAfterCanceling(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun connectionWindowUpdateAfterCanceling() {
     server.enqueue(
       MockResponse
         .Builder()
@@ -435,13 +391,8 @@ class HttpOverHttp2Test {
     }
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun connectionWindowUpdateOnClose(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun connectionWindowUpdateOnClose() {
     server.enqueue(
       MockResponse
         .Builder()
@@ -468,13 +419,8 @@ class HttpOverHttp2Test {
     assertThat(response2.body.string()).isEqualTo("abc")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun concurrentRequestWithEmptyFlowControlWindow(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun concurrentRequestWithEmptyFlowControlWindow() {
     server.enqueue(
       MockResponse
         .Builder()
@@ -505,15 +451,10 @@ class HttpOverHttp2Test {
     assertThat(response2.body.string()).isEqualTo("abc")
   }
 
-  /** https://github.com/square/okhttp/issues/373  */
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
+  /** https://github.com/lysine-dev/okhttp/issues/373  */
+  @Test
   @Disabled
-  fun synchronousRequest(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  fun synchronousRequest() {
     server.enqueue(MockResponse(body = "A"))
     server.enqueue(MockResponse(body = "A"))
     val executor = Executors.newCachedThreadPool(threadFactory("HttpOverHttp2Test"))
@@ -521,17 +462,12 @@ class HttpOverHttp2Test {
     executor.execute(AsyncRequest("/r1", countDownLatch))
     executor.execute(AsyncRequest("/r2", countDownLatch))
     countDownLatch.await()
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun gzippedResponseBody(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun gzippedResponseBody() {
     server.enqueue(
       MockResponse
         .Builder()
@@ -544,13 +480,8 @@ class HttpOverHttp2Test {
     assertThat(response.body.string()).isEqualTo("ABCABCABC")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun authenticate(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun authenticate() {
     server.enqueue(
       MockResponse(
         code = HttpURLConnection.HTTP_UNAUTHORIZED,
@@ -573,17 +504,12 @@ class HttpOverHttp2Test {
     val denied = server.takeRequest()
     assertThat(denied.headers["Authorization"]).isNull()
     val accepted = server.takeRequest()
-    assertThat(accepted.requestLine).isEqualTo("GET / HTTP/1.1")
+    assertThat(accepted.requestLine).isEqualTo("GET / HTTP/2")
     assertThat(accepted.headers["Authorization"]).isEqualTo(credential)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun redirect(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun redirect() {
     server.enqueue(
       MockResponse(
         code = HttpURLConnection.HTTP_MOVED_TEMP,
@@ -596,18 +522,13 @@ class HttpOverHttp2Test {
     val response = call.execute()
     assertThat(response.body.string()).isEqualTo("This is the new location!")
     val request1 = server.takeRequest()
-    assertThat(request1.path).isEqualTo("/")
+    assertThat(request1.url.encodedPath).isEqualTo("/")
     val request2 = server.takeRequest()
-    assertThat(request2.path).isEqualTo("/foo")
+    assertThat(request2.url.encodedPath).isEqualTo("/foo")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun readAfterLastByte(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun readAfterLastByte() {
     server.enqueue(MockResponse(body = "ABC"))
     val call = client.newCall(Request(server.url("/")))
     val response = call.execute()
@@ -620,14 +541,9 @@ class HttpOverHttp2Test {
     inputStream.close()
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun readResponseHeaderTimeout(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
-    server.enqueue(MockResponse(socketPolicy = NoResponse))
+  @Test
+  fun readResponseHeaderTimeout() {
+    server.enqueue(MockResponse.Builder().onResponseStart(Stall).build())
     server.enqueue(MockResponse(body = "A"))
     client =
       client
@@ -649,8 +565,8 @@ class HttpOverHttp2Test {
     assertThat(response2.body.string()).isEqualTo("A")
 
     // Confirm that the connection was reused.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
   }
 
   /**
@@ -658,13 +574,8 @@ class HttpOverHttp2Test {
    * case, we take a 4KiB body and throttle it to 1KiB/second.  We set the read timeout to two
    * seconds.  If our implementation is acting correctly, it will not throw, as it is progressing.
    */
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun readTimeoutMoreGranularThanBodySize(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun readTimeoutMoreGranularThanBodySize() {
     val body = CharArray(4096) // 4KiB to read.
     Arrays.fill(body, 'y')
     server.enqueue(
@@ -690,13 +601,8 @@ class HttpOverHttp2Test {
    * second.  If our implementation is acting correctly, it will throw, as a byte doesn't arrive in
    * time.
    */
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun readTimeoutOnSlowConnection(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun readTimeoutOnSlowConnection() {
     val body = repeat('y', 2048)
     server.enqueue(
       MockResponse
@@ -729,17 +635,12 @@ class HttpOverHttp2Test {
     assertThat(response2.body.string()).isEqualTo(body)
 
     // Confirm that the connection was reused.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun connectionTimeout(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun connectionTimeout() {
     server.enqueue(
       MockResponse
         .Builder()
@@ -780,17 +681,12 @@ class HttpOverHttp2Test {
     }
 
     // Confirm that the connection was reused.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun responsesAreCached(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun responsesAreCached() {
     client =
       client
         .newBuilder()
@@ -819,13 +715,8 @@ class HttpOverHttp2Test {
     assertThat(cache.hitCount()).isEqualTo(2)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun conditionalCache(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun conditionalCache() {
     client =
       client
         .newBuilder()
@@ -854,13 +745,8 @@ class HttpOverHttp2Test {
     assertThat(cache.hitCount()).isEqualTo(1)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun responseCachedWithoutConsumingFullBody(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun responseCachedWithoutConsumingFullBody() {
     client =
       client
         .newBuilder()
@@ -888,13 +774,8 @@ class HttpOverHttp2Test {
     response2.body.close()
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun sendRequestCookies(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun sendRequestCookies() {
     val cookieJar = RecordingCookieJar()
     val requestCookie =
       Cookie
@@ -917,13 +798,8 @@ class HttpOverHttp2Test {
     assertThat(request.headers["Cookie"]).isEqualTo("a=b")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun receiveResponseCookies(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun receiveResponseCookies() {
     val cookieJar = RecordingCookieJar()
     client =
       client
@@ -939,13 +815,8 @@ class HttpOverHttp2Test {
     cookieJar.assertResponseCookies("a=b; path=/")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun cancelWithStreamNotCompleted(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun cancelWithStreamNotCompleted() {
     server.enqueue(MockResponse(body = "abc"))
     server.enqueue(MockResponse(body = "def"))
 
@@ -959,21 +830,19 @@ class HttpOverHttp2Test {
     val call2 = client.newCall(Request(server.url("/")))
     val response2 = call2.execute()
     assertThat(response2.body.string()).isEqualTo("def")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
 
     // Clean up the connection.
     response.close()
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun noRecoveryFromOneRefusedStream(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun noRecoveryFromOneRefusedStream() {
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(MockResponse(body = "abc"))
     val call = client.newCall(Request(server.url("/")))
@@ -984,54 +853,56 @@ class HttpOverHttp2Test {
     }
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun recoverFromRefusedStreamWhenAnotherRouteExists(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun recoverFromRefusedStreamWhenAnotherRouteExists() {
     client =
       client
         .newBuilder()
         .dns(DoubleInetAddressDns()) // Two routes!
         .build()
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(MockResponse(body = "abc"))
 
     val request = Request(server.url("/"))
     val response = client.newCall(request).execute()
     assertThat(response.body.string()).isEqualTo("abc")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
 
     // Note that although we have two routes available, we only use one. The retry is permitted
     // because there are routes available, but it chooses the existing connection since it isn't
     // yet considered unhealthy.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun noRecoveryWhenRoutesExhausted(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun noRecoveryWhenRoutesExhausted() {
     client =
       client
         .newBuilder()
         .dns(DoubleInetAddressDns()) // Two routes!
         .build()
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
 
     val request = Request(server.url("/"))
@@ -1040,20 +911,18 @@ class HttpOverHttp2Test {
     }.also { expected ->
       assertThat(expected.errorCode).isEqualTo(ErrorCode.REFUSED_STREAM)
     }
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0) // New connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1) // Pooled connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0) // New connection.
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0) // New connection.
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1) // Pooled connection.
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0) // New connection.
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun connectionWithOneRefusedStreamIsPooled(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun connectionWithOneRefusedStreamIsPooled() {
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(MockResponse(body = "abc"))
     val request = Request(server.url("/"))
@@ -1064,26 +933,27 @@ class HttpOverHttp2Test {
     }.also { expected ->
       assertThat(expected.errorCode).isEqualTo(ErrorCode.REFUSED_STREAM)
     }
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
 
     // Second call succeeds on the pooled connection.
     val response = client.newCall(request).execute()
     assertThat(response.body.string()).isEqualTo("abc")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun connectionWithTwoRefusedStreamsIsNotPooled(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun connectionWithTwoRefusedStreamsIsNotPooled() {
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(MockResponse(body = "abc"))
     server.enqueue(MockResponse(body = "def"))
@@ -1095,38 +965,39 @@ class HttpOverHttp2Test {
     }.also { expected ->
       assertThat(expected.errorCode).isEqualTo(ErrorCode.REFUSED_STREAM)
     }
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0) // New connection.
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0) // New connection.
 
     // Second call attempts the pooled connection, and it fails. Then it retries a new route which
     // succeeds.
     val response2 = client.newCall(request).execute()
     assertThat(response2.body.string()).isEqualTo("abc")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1) // Pooled connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0) // New connection.
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1) // Pooled connection.
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0) // New connection.
 
     // Third call reuses the second connection.
     val response3 = client.newCall(request).execute()
     assertThat(response3.body.string()).isEqualTo("def")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1) // New connection.
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1) // New connection.
   }
 
   /**
    * We had a bug where we'd perform infinite retries of route that fail with connection shutdown
    * errors. The problem was that the logic that decided whether to reuse a route didn't track
-   * certain HTTP/2 errors. https://github.com/square/okhttp/issues/5547
+   * certain HTTP/2 errors. https://github.com/lysine-dev/okhttp/issues/5547
    */
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun noRecoveryFromTwoRefusedStreams(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun noRecoveryFromTwoRefusedStreams() {
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(
       MockResponse(body = "abc"),
@@ -1139,29 +1010,19 @@ class HttpOverHttp2Test {
     }
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun recoverFromOneInternalErrorRequiresNewConnection(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun recoverFromOneInternalErrorRequiresNewConnection() {
     recoverFromOneHttp2ErrorRequiresNewConnection(ErrorCode.INTERNAL_ERROR)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun recoverFromOneCancelRequiresNewConnection(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun recoverFromOneCancelRequiresNewConnection() {
     recoverFromOneHttp2ErrorRequiresNewConnection(ErrorCode.CANCEL)
   }
 
   private fun recoverFromOneHttp2ErrorRequiresNewConnection(errorCode: ErrorCode?) {
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(errorCode!!.httpCode)),
+      MockResponse.Builder().onRequestStart(CloseStream(errorCode!!.httpCode)).build(),
     )
     server.enqueue(MockResponse(body = "abc"))
     client =
@@ -1174,23 +1035,28 @@ class HttpOverHttp2Test {
     assertThat(response.body.string()).isEqualTo("abc")
 
     // New connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    val c0e0 = server.takeRequest()
+    assertThat(c0e0.connectionIndex).isEqualTo(0)
+    assertThat(c0e0.exchangeIndex).isEqualTo(0)
     // New connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    val c1e0 = server.takeRequest()
+    assertThat(c1e0.connectionIndex).isEqualTo(1)
+    assertThat(c1e0.exchangeIndex).isEqualTo(0)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun recoverFromMultipleRefusedStreamsRequiresNewConnection(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun recoverFromMultipleRefusedStreamsRequiresNewConnection() {
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+        .build(),
     )
     server.enqueue(MockResponse(body = "abc"))
     client =
@@ -1203,20 +1069,15 @@ class HttpOverHttp2Test {
     assertThat(response.body.string()).isEqualTo("abc")
 
     // New connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
     // Reused connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
     // New connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun recoverFromCancelReusesConnection(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun recoverFromCancelReusesConnection() {
     val responseDequeuedLatches =
       listOf(
         // No synchronization for the last request, which is not canceled:
@@ -1229,14 +1090,14 @@ class HttpOverHttp2Test {
         CountDownLatch(0),
       )
     val dispatcher = RespondAfterCancelDispatcher(responseDequeuedLatches, requestCanceledLatches)
-    dispatcher.enqueueResponse(
+    dispatcher.enqueue(
       MockResponse
         .Builder()
         .bodyDelay(10, TimeUnit.SECONDS)
         .body("abc")
         .build(),
     )
-    dispatcher.enqueueResponse(
+    dispatcher.enqueue(
       MockResponse(body = "def"),
     )
     server.dispatcher = dispatcher
@@ -1251,16 +1112,11 @@ class HttpOverHttp2Test {
     val call = client.newCall(Request(server.url("/")))
     val response = call.execute()
     assertThat(response.body.string()).isEqualTo("def")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun recoverFromMultipleCancelReusesConnection(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun recoverFromMultipleCancelReusesConnection() {
     val responseDequeuedLatches =
       Arrays.asList(
         CountDownLatch(1),
@@ -1275,21 +1131,21 @@ class HttpOverHttp2Test {
         CountDownLatch(0),
       )
     val dispatcher = RespondAfterCancelDispatcher(responseDequeuedLatches, requestCanceledLatches)
-    dispatcher.enqueueResponse(
+    dispatcher.enqueue(
       MockResponse
         .Builder()
         .bodyDelay(10, TimeUnit.SECONDS)
         .body("abc")
         .build(),
     )
-    dispatcher.enqueueResponse(
+    dispatcher.enqueue(
       MockResponse
         .Builder()
         .bodyDelay(10, TimeUnit.SECONDS)
         .body("def")
         .build(),
     )
-    dispatcher.enqueueResponse(
+    dispatcher.enqueue(
       MockResponse(body = "ghi"),
     )
     server.dispatcher = dispatcher
@@ -1305,7 +1161,7 @@ class HttpOverHttp2Test {
     val call = client.newCall(Request(server.url("/")))
     val response = call.execute()
     assertThat(response.body.string()).isEqualTo("ghi")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(2)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(2)
   }
 
   private class RespondAfterCancelDispatcher(
@@ -1355,47 +1211,34 @@ class HttpOverHttp2Test {
         }
       },
     )
-    assertThat(server.takeRequest().sequenceNumber)
+    assertThat(server.takeRequest().exchangeIndex)
       .isEqualTo(expectedSequenceNumber)
     responseDequeuedLatch!!.await()
     call.cancel()
+    // Avoid flaky race conditions
+    Thread.sleep(100)
     requestCanceledLatch!!.countDown()
     latch.await()
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun noRecoveryFromRefusedStreamWithRetryDisabled(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun noRecoveryFromRefusedStreamWithRetryDisabled() {
     noRecoveryFromErrorWithRetryDisabled(ErrorCode.REFUSED_STREAM)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun noRecoveryFromInternalErrorWithRetryDisabled(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun noRecoveryFromInternalErrorWithRetryDisabled() {
     noRecoveryFromErrorWithRetryDisabled(ErrorCode.INTERNAL_ERROR)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun noRecoveryFromCancelWithRetryDisabled(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun noRecoveryFromCancelWithRetryDisabled() {
     noRecoveryFromErrorWithRetryDisabled(ErrorCode.CANCEL)
   }
 
   private fun noRecoveryFromErrorWithRetryDisabled(errorCode: ErrorCode?) {
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(errorCode!!.httpCode)),
+      MockResponse.Builder().onRequestStart(CloseStream(errorCode!!.httpCode)).build(),
     )
     server.enqueue(MockResponse(body = "abc"))
     client =
@@ -1411,16 +1254,14 @@ class HttpOverHttp2Test {
     }
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun recoverFromConnectionNoNewStreamsOnFollowUp(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun recoverFromConnectionNoNewStreamsOnFollowUp() {
     server.enqueue(MockResponse(code = 401))
     server.enqueue(
-      MockResponse(socketPolicy = ResetStreamAtStart(ErrorCode.INTERNAL_ERROR.httpCode)),
+      MockResponse
+        .Builder()
+        .onRequestStart(CloseStream(ErrorCode.INTERNAL_ERROR.httpCode))
+        .build(),
     )
     server.enqueue(MockResponse(body = "DEF"))
     server.enqueue(
@@ -1469,32 +1310,27 @@ class HttpOverHttp2Test {
     blockingAuthClient.newCall(request).enqueue(callback)
     val response1 = responses.take()
     assertThat(response1).isEqualTo("")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
 
     // Now make the second request which will restrict the first HTTP/2 connection from creating new
     // streams.
     client.newCall(request).enqueue(callback)
     val response2 = responses.take()
     assertThat(response2).isEqualTo("DEF")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
 
     // Let the first request proceed. It should discard the the held HTTP/2 connection and get a new
     // one.
     latch.countDown()
     val response3 = responses.take()
     assertThat(response3).isEqualTo("ABC")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(2)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(2)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun nonAsciiResponseHeader(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun nonAsciiResponseHeader() {
     server.enqueue(
       MockResponse
         .Builder()
@@ -1509,13 +1345,8 @@ class HttpOverHttp2Test {
     assertThat(response.header("β")).isEqualTo("Beta")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun serverSendsPushPromise_GET(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun serverSendsPushPromise_GET() {
     val pushPromise =
       PushPromise(
         "GET",
@@ -1536,23 +1367,18 @@ class HttpOverHttp2Test {
     assertThat(response.code).isEqualTo(200)
     assertThat(response.message).isEqualTo("")
     val request = server.takeRequest()
-    assertThat(request.requestLine).isEqualTo("GET /foo HTTP/1.1")
+    assertThat(request.requestLine).isEqualTo("GET /foo HTTP/2")
     assertThat(request.headers[":scheme"]).isEqualTo(scheme)
     assertThat(request.headers[":authority"]).isEqualTo(
       server.hostName + ":" + server.port,
     )
     val pushedRequest = server.takeRequest()
-    assertThat(pushedRequest.requestLine).isEqualTo("GET /foo/bar HTTP/1.1")
+    assertThat(pushedRequest.requestLine).isEqualTo("GET /foo/bar HTTP/2")
     assertThat(pushedRequest.headers["foo"]).isEqualTo("bar")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun serverSendsPushPromise_HEAD(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun serverSendsPushPromise_HEAD() {
     val pushPromise =
       PushPromise(
         "HEAD",
@@ -1573,25 +1399,18 @@ class HttpOverHttp2Test {
     assertThat(response.code).isEqualTo(200)
     assertThat(response.message).isEqualTo("")
     val request = server.takeRequest()
-    assertThat(request.requestLine).isEqualTo("GET /foo HTTP/1.1")
+    assertThat(request.requestLine).isEqualTo("GET /foo HTTP/2")
     assertThat(request.headers[":scheme"]).isEqualTo(scheme)
     assertThat(request.headers[":authority"]).isEqualTo(
       server.hostName + ":" + server.port,
     )
     val pushedRequest = server.takeRequest()
-    assertThat(pushedRequest.requestLine).isEqualTo(
-      "HEAD /foo/bar HTTP/1.1",
-    )
+    assertThat(pushedRequest.requestLine).isEqualTo("HEAD /foo/bar HTTP/2")
     assertThat(pushedRequest.headers["foo"]).isEqualTo("bar")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun noDataFramesSentWithNullRequestBody(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun noDataFramesSentWithNullRequestBody() {
     server.enqueue(MockResponse(body = "ABC"))
     val call =
       client.newCall(
@@ -1609,20 +1428,15 @@ class HttpOverHttp2Test {
       .contains("HEADERS       END_STREAM|END_HEADERS")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun emptyDataFrameSentWithEmptyBody(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun emptyDataFrameSentWithEmptyBody() {
     server.enqueue(MockResponse(body = "ABC"))
     val call =
       client.newCall(
         Request
           .Builder()
           .url(server.url("/"))
-          .method("DELETE", RequestBody.Empty)
+          .method("DELETE", RequestBody.EMPTY)
           .build(),
       )
     val response = call.execute()
@@ -1640,13 +1454,8 @@ class HttpOverHttp2Test {
       .isEqualTo(1)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun pingsTransmitted(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun pingsTransmitted() {
     // Ping every 500 ms, starting at 500 ms.
     client =
       client
@@ -1679,15 +1488,10 @@ class HttpOverHttp2Test {
       .isEqualTo(1)
   }
 
-  @Flaky @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun missingPongsFailsConnection(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun missingPongsFailsConnection() {
     if (protocol === Protocol.HTTP_2) {
-      // https://github.com/square/okhttp/issues/5221
+      // https://github.com/lysine-dev/okhttp/issues/5221
       platform.expectFailureOnJdkVersion(12)
     }
 
@@ -1700,7 +1504,7 @@ class HttpOverHttp2Test {
         .build()
 
     // Set up the server to ignore the socket. It won't respond to pings!
-    server.enqueue(MockResponse(socketPolicy = StallSocketAtStart))
+    server.enqueue(MockResponse.Builder().onRequestStart(Stall).build())
 
     // Make a call. It'll fail as soon as our pings detect a problem.
     val call = client.newCall(Request(server.url("/")))
@@ -1724,13 +1528,8 @@ class HttpOverHttp2Test {
       .isEqualTo(0)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun streamTimeoutDegradesConnectionAfterNoPong(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun streamTimeoutDegradesConnectionAfterNoPong() {
     assumeNotWindows()
     client =
       client
@@ -1739,7 +1538,7 @@ class HttpOverHttp2Test {
         .build()
 
     // Stalling the socket will cause TWO requests to time out!
-    server.enqueue(MockResponse(socketPolicy = StallSocketAtStart))
+    server.enqueue(MockResponse.Builder().onRequestStart(Stall).build())
 
     // The 3rd request should be sent to a fresh connection.
     server.enqueue(
@@ -1753,7 +1552,10 @@ class HttpOverHttp2Test {
     }.also { expected ->
       when (expected) {
         is SocketTimeoutException, is SSLException -> {}
-        else -> throw expected
+
+        else -> {
+          throw expected
+        }
       }
     }
 
@@ -1773,13 +1575,8 @@ class HttpOverHttp2Test {
     }
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun oneStreamTimeoutDoesNotBreakConnection(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun oneStreamTimeoutDoesNotBreakConnection() {
     client =
       client
         .newBuilder()
@@ -1821,9 +1618,9 @@ class HttpOverHttp2Test {
     }
 
     // All calls share a connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(2)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(2)
   }
 
   private fun firstFrame(
@@ -1855,13 +1652,8 @@ class HttpOverHttp2Test {
    * Push a setting that permits up to 2 concurrent streams, then make 3 concurrent requests and
    * confirm that the third concurrent request prepared a new connection.
    */
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun settingsLimitsMaxConcurrentStreams(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun settingsLimitsMaxConcurrentStreams() {
     val settings = Settings()
     settings[Settings.MAX_CONCURRENT_STREAMS] = 2
 
@@ -1894,27 +1686,23 @@ class HttpOverHttp2Test {
     assertThat(response2.body.string()).isEqualTo("DEF")
     assertThat(response3.body.string()).isEqualTo("GHI")
     // Settings connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
     // Reuse settings connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(1)
     // Reuse settings connection.
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(2)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(2)
     // New connection!
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun connectionNotReusedAfterShutdown(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun connectionNotReusedAfterShutdown() {
     server.enqueue(
-      MockResponse(
-        body = "ABC",
-        socketPolicy = DisconnectAtEnd,
-      ),
+      MockResponse
+        .Builder()
+        .body("ABC")
+        .onResponseEnd(ShutdownConnection)
+        .build(),
     )
     server.enqueue(MockResponse(body = "DEF"))
     // Enqueue an additional response that show if we burnt a good prior response.
@@ -1944,8 +1732,8 @@ class HttpOverHttp2Test {
     val call2 = localClient.newCall(Request(server.url("/")))
     val response2 = call2.execute()
     assertThat(response2.body.string()).isEqualTo("DEF")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
   }
 
   @Throws(InterruptedException::class, TimeoutException::class)
@@ -1965,18 +1753,14 @@ class HttpOverHttp2Test {
    * This simulates a race condition where we receive a healthy HTTP/2 connection and just prior to
    * writing our request, we get a GOAWAY frame from the server.
    */
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun connectionShutdownAfterHealthCheck(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun connectionShutdownAfterHealthCheck() {
     server.enqueue(
-      MockResponse(
-        body = "ABC",
-        socketPolicy = DisconnectAtEnd,
-      ),
+      MockResponse
+        .Builder()
+        .body("ABC")
+        .onResponseEnd(ShutdownConnection)
+        .build(),
     )
     server.enqueue(MockResponse(body = "DEF"))
     val client2 =
@@ -2011,17 +1795,12 @@ class HttpOverHttp2Test {
     val call = client2.newCall(Request(server.url("/")))
     val response = call.execute()
     assertThat(response.body.string()).isEqualTo("DEF")
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
-    assertThat(server.takeRequest().sequenceNumber).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
+    assertThat(server.takeRequest().exchangeIndex).isEqualTo(0)
   }
 
-  @Flaky @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun responseHeadersAfterGoaway(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun responseHeadersAfterGoaway() {
     server.enqueue(
       MockResponse
         .Builder()
@@ -2030,10 +1809,11 @@ class HttpOverHttp2Test {
         .build(),
     )
     server.enqueue(
-      MockResponse(
-        body = "DEF",
-        socketPolicy = DisconnectAtEnd,
-      ),
+      MockResponse
+        .Builder()
+        .body("DEF")
+        .onResponseEnd(ShutdownConnection)
+        .build(),
     )
     val latch = CountDownLatch(2)
     val errors = ArrayList<IOException?>()
@@ -2068,8 +1848,8 @@ class HttpOverHttp2Test {
       assertThat(bodies.remove()).isEqualTo("ABC")
       assertThat(server.requestCount).isEqualTo(2)
     } else {
-      // https://github.com/square/okhttp/issues/4836
-      // As documented in SocketPolicy, this is known to be flaky.
+      // https://github.com/lysine-dev/okhttp/issues/4836
+      // As documented in SocketEffect, this is known to be flaky.
       val error = errors[0]
       if (error !is StreamResetException) {
         throw error!!
@@ -2084,20 +1864,25 @@ class HttpOverHttp2Test {
    *
    * This test uses proxy tunnels to get a hook while a connection is being established.
    */
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun concurrentHttp2ConnectionsDeduplicated(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun concurrentHttp2ConnectionsDeduplicated() {
     assumeTrue(protocol === Protocol.HTTP_2)
     server.useHttps(handshakeCertificates.sslSocketFactory())
     val queueDispatcher = QueueDispatcher()
-    queueDispatcher.enqueueResponse(MockResponse(inTunnel = true))
-    queueDispatcher.enqueueResponse(MockResponse(inTunnel = true))
-    queueDispatcher.enqueueResponse(MockResponse(body = "call2 response"))
-    queueDispatcher.enqueueResponse(MockResponse(body = "call1 response"))
+    queueDispatcher.enqueue(
+      MockResponse
+        .Builder()
+        .inTunnel()
+        .build(),
+    )
+    queueDispatcher.enqueue(
+      MockResponse
+        .Builder()
+        .inTunnel()
+        .build(),
+    )
+    queueDispatcher.enqueue(MockResponse(body = "call2 response"))
+    queueDispatcher.enqueue(MockResponse(body = "call1 response"))
 
     // We use a re-entrant dispatcher to initiate one HTTPS connection while the other is in flight.
     server.dispatcher =
@@ -2128,43 +1913,38 @@ class HttpOverHttp2Test {
 
         override fun peek(): MockResponse = queueDispatcher.peek()
 
-        override fun shutdown() {
-          queueDispatcher.shutdown()
+        override fun close() {
+          queueDispatcher.close()
         }
       }
     client =
       client
         .newBuilder()
-        .proxy(server.toProxyAddress())
+        .proxy(server.proxyAddress)
         .build()
     val call1 = client.newCall(Request("https://android.com/call1".toHttpUrl()))
     val response2 = call1.execute()
     assertThat(response2.body.string()).isEqualTo("call1 response")
     val call1Connect = server.takeRequest()
     assertThat(call1Connect.method).isEqualTo("CONNECT")
-    assertThat(call1Connect.sequenceNumber).isEqualTo(0)
+    assertThat(call1Connect.exchangeIndex).isEqualTo(0)
     val call2Connect = server.takeRequest()
     assertThat(call2Connect.method).isEqualTo("CONNECT")
-    assertThat(call2Connect.sequenceNumber).isEqualTo(0)
+    assertThat(call2Connect.exchangeIndex).isEqualTo(0)
     val call2Get = server.takeRequest()
     assertThat(call2Get.method).isEqualTo("GET")
-    assertThat(call2Get.path).isEqualTo("/call2")
-    assertThat(call2Get.sequenceNumber).isEqualTo(0)
+    assertThat(call2Get.url.encodedPath).isEqualTo("/call2")
+    assertThat(call2Get.exchangeIndex).isEqualTo(0)
     val call1Get = server.takeRequest()
     assertThat(call1Get.method).isEqualTo("GET")
-    assertThat(call1Get.path).isEqualTo("/call1")
-    assertThat(call1Get.sequenceNumber).isEqualTo(1)
+    assertThat(call1Get.url.encodedPath).isEqualTo("/call1")
+    assertThat(call1Get.exchangeIndex).isEqualTo(1)
     assertThat(client.connectionPool.connectionCount()).isEqualTo(1)
   }
 
-  /** https://github.com/square/okhttp/issues/3103  */
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun domainFronting(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  /** https://github.com/lysine-dev/okhttp/issues/3103  */
+  @Test
+  fun domainFronting() {
     client =
       client
         .newBuilder()
@@ -2217,14 +1997,9 @@ class HttpOverHttp2Test {
     }
   }
 
-  /** https://github.com/square/okhttp/issues/4875  */
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun shutdownAfterLateCoalescing(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  /** https://github.com/lysine-dev/okhttp/issues/4875  */
+  @Test
+  fun shutdownAfterLateCoalescing() {
     val latch = CountDownLatch(2)
     val callback: Callback =
       object : Callback {
@@ -2256,7 +2031,7 @@ class HttpOverHttp2Test {
               ) {
                 try {
                   if (callCount++ == 1) {
-                    server.shutdown()
+                    server.close()
                   }
                 } catch (e: IOException) {
                   fail("")
@@ -2274,13 +2049,8 @@ class HttpOverHttp2Test {
     latch.await()
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun cancelWhileWritingRequestBodySendsCancelToServer(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun cancelWhileWritingRequestBodySendsCancelToServer() {
     server.enqueue(MockResponse())
     val callReference = AtomicReference<Call?>()
     val call =
@@ -2307,19 +2077,19 @@ class HttpOverHttp2Test {
     assertThat(recordedRequest.failure!!).hasMessage("stream was reset: CANCEL")
   }
 
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun http2WithProxy(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
-    server.enqueue(MockResponse(inTunnel = true))
+  @Test
+  fun http2WithProxy() {
+    server.enqueue(
+      MockResponse
+        .Builder()
+        .inTunnel()
+        .build(),
+    )
     server.enqueue(MockResponse(body = "ABCDE"))
     val client =
       client
         .newBuilder()
-        .proxy(server.toProxyAddress())
+        .proxy(server.proxyAddress)
         .build()
 
     val url = server.url("/").resolve("//android.com/foo")!!
@@ -2341,32 +2111,33 @@ class HttpOverHttp2Test {
     assertThat(tunnelRequest.requestLine).isEqualTo("CONNECT android.com:$port HTTP/1.1")
 
     val request = server.takeRequest()
-    assertThat(request.requestLine).isEqualTo("GET /foo HTTP/1.1")
+    assertThat(request.requestLine).isEqualTo("GET /foo HTTP/2")
     assertThat(request.headers[":scheme"]).isEqualTo(scheme)
     assertThat(request.headers[":authority"]).isEqualTo("android.com")
   }
 
   /** Respond to a proxy authorization challenge.  */
-  @ParameterizedTest
-  @ArgumentsSource(ProtocolParamProvider::class)
-  fun proxyAuthenticateOnConnect(
-    protocol: Protocol,
-    mockWebServer: MockWebServer,
-  ) {
-    setUp(protocol, mockWebServer)
+  @Test
+  fun proxyAuthenticateOnConnect() {
     server.enqueue(
-      MockResponse(
-        code = 407,
-        headers = headersOf("Proxy-Authenticate", "Basic realm=\"localhost\""),
-        inTunnel = true,
-      ),
+      MockResponse
+        .Builder()
+        .code(407)
+        .headers(headersOf("Proxy-Authenticate", "Basic realm=\"localhost\""))
+        .inTunnel()
+        .build(),
     )
-    server.enqueue(MockResponse(inTunnel = true))
+    server.enqueue(
+      MockResponse
+        .Builder()
+        .inTunnel()
+        .build(),
+    )
     server.enqueue(MockResponse(body = "response body"))
     val client =
       client
         .newBuilder()
-        .proxy(server.toProxyAddress())
+        .proxy(server.proxyAddress)
         .proxyAuthenticator(RecordingOkAuthenticator("password", "Basic"))
         .build()
 
@@ -2391,7 +2162,7 @@ class HttpOverHttp2Test {
     assertThat(connect2.headers["Proxy-Authorization"]).isEqualTo("password")
 
     val get = server.takeRequest()
-    assertThat(get.requestLine).isEqualTo("GET /foo HTTP/1.1")
+    assertThat(get.requestLine).isEqualTo("GET /foo HTTP/2")
     assertThat(get.headers["Proxy-Authorization"]).isNull()
   }
 }

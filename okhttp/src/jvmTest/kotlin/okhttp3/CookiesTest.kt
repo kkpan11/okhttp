@@ -33,10 +33,10 @@ import java.net.InetAddress
 import java.net.URI
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.junit5.StartStop
 import okhttp3.Cookie.Companion.parse
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.java.net.cookiejar.JavaNetCookieJar
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.extension.RegisterExtension
@@ -46,13 +46,11 @@ import org.junit.jupiter.api.extension.RegisterExtension
 class CookiesTest {
   @RegisterExtension
   val clientTestRule = OkHttpClientTestRule()
-  private lateinit var server: MockWebServer
-  private var client = clientTestRule.newClient()
 
-  @BeforeEach
-  fun setUp(server: MockWebServer) {
-    this.server = server
-  }
+  @StartStop
+  private val server = MockWebServer()
+
+  private var client = clientTestRule.newClient()
 
   @Test
   fun testNetscapeResponse() {
@@ -378,6 +376,62 @@ class CookiesTest {
     assertThat(request.headers["Cookie"]).isEqualTo("Bar=\"; Baz=baz")
     assertThat(request.headers["Cookie2"]).isNull()
     assertThat(request.headers["Quux"]).isNull()
+  }
+
+  @Test
+  fun cookieHandlerWithQuotedValueAndTrailingSpace() {
+    server.enqueue(MockResponse())
+    val serverUrl = urlWithIpAddress(server, "/")
+    val androidCookieHandler: CookieHandler =
+      object : CookieHandler() {
+        override fun get(
+          uri: URI,
+          map: Map<String, List<String>>,
+        ) = mapOf(
+          "Cookie" to
+            listOf(
+              "a=\"android \"",
+            ),
+        )
+
+        override fun put(
+          uri: URI,
+          map: Map<String, List<String>>,
+        ) {
+        }
+      }
+    client =
+      client
+        .newBuilder()
+        .cookieJar(JavaNetCookieJar(androidCookieHandler))
+        .build()
+    get(serverUrl)
+    val request = server.takeRequest()
+    assertThat(request.headers["Cookie"]).isEqualTo("a=android")
+    assertThat(request.headers["Quux"]).isNull()
+  }
+
+  @Test
+  fun receiveAndSendUntrimmedCookie() {
+    server.enqueue(
+      MockResponse
+        .Builder()
+        .addHeader("Set-Cookie", "a=\"android \"")
+        .build(),
+    )
+    server.enqueue(MockResponse())
+    val cookieManager = CookieManager(null, CookiePolicy.ACCEPT_ORIGINAL_SERVER)
+    client =
+      client
+        .newBuilder()
+        .cookieJar(JavaNetCookieJar(cookieManager))
+        .build()
+    get(urlWithIpAddress(server, "/"))
+    val request1 = server.takeRequest()
+    assertThat(request1.headers["Cookie"]).isNull()
+    get(urlWithIpAddress(server, "/"))
+    val request2 = server.takeRequest()
+    assertThat(request2.headers["Cookie"]).isEqualTo("a=android")
   }
 
   private fun urlWithIpAddress(

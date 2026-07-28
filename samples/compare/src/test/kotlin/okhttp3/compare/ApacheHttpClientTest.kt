@@ -16,10 +16,12 @@
 package okhttp3.compare
 
 import assertk.assertThat
+import assertk.assertions.containsExactlyInAnyOrder
 import assertk.assertions.isEqualTo
 import assertk.assertions.startsWith
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
+import mockwebserver3.junit5.StartStop
 import org.apache.hc.client5.http.classic.methods.HttpGet
 import org.apache.hc.client5.http.impl.classic.HttpClients
 import org.apache.hc.core5.http.io.entity.EntityUtils
@@ -36,11 +38,16 @@ import org.junit.jupiter.api.Test
 class ApacheHttpClientTest {
   private val httpClient = HttpClients.createDefault()
 
-  @AfterEach fun tearDown() {
+  @StartStop
+  private val server = MockWebServer()
+
+  @AfterEach
+  fun tearDown() {
     httpClient.close()
   }
 
-  @Test fun get(server: MockWebServer) {
+  @Test
+  fun get() {
     server.enqueue(
       MockResponse
         .Builder()
@@ -51,6 +58,7 @@ class ApacheHttpClientTest {
     val request = HttpGet(server.url("/").toUri())
     request.addHeader("Accept", "text/plain")
 
+    @Suppress("DEPRECATION")
     httpClient.execute(request).use { response ->
       assertThat(response.code).isEqualTo(200)
       assertThat(EntityUtils.toString(response.entity)).isEqualTo("hello, Apache HttpClient 5.x")
@@ -58,7 +66,13 @@ class ApacheHttpClientTest {
 
     val recorded = server.takeRequest()
     assertThat(recorded.headers["Accept"]).isEqualTo("text/plain")
-    assertThat(recorded.headers["Accept-Encoding"]).isEqualTo("gzip, x-gzip, deflate")
+    assertThat(
+      recorded.headers["Accept-Encoding"]?.split(", ").orEmpty(),
+    ).containsExactlyInAnyOrder(
+      "gzip",
+      "x-gzip",
+      "deflate",
+    )
     assertThat(recorded.headers["User-Agent"]!!).startsWith("Apache-HttpClient/")
   }
 }

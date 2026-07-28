@@ -15,6 +15,7 @@
  */
 package okhttp3
 
+import app.cash.burst.Burst
 import assertk.assertThat
 import assertk.assertions.containsExactly
 import assertk.assertions.isEmpty
@@ -26,17 +27,17 @@ import java.net.Proxy
 import java.net.SocketTimeoutException
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.SocketPolicy.ResetStreamAtStart
-import mockwebserver3.junit5.internal.MockWebServerInstance
+import mockwebserver3.SocketEffect.CloseStream
+import mockwebserver3.junit5.StartStop
 import okhttp3.internal.http.RecordingProxySelector
 import okhttp3.internal.http2.ErrorCode
 import okhttp3.testing.PlatformRule
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.RepeatedTest
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.extension.RegisterExtension
-import org.junit.jupiter.params.ParameterizedTest
-import org.junit.jupiter.params.provider.ValueSource
 
+@Burst
 class RouteFailureTest {
   private lateinit var socketFactory: SpecificHostSocketFactory
   private lateinit var client: OkHttpClient
@@ -47,10 +48,13 @@ class RouteFailureTest {
   @RegisterExtension
   val clientTestRule = OkHttpClientTestRule()
 
-  private lateinit var server1: MockWebServer
-  private lateinit var server2: MockWebServer
+  @StartStop
+  val server1 = MockWebServer()
 
-  private var listener = RecordingEventListener()
+  @StartStop
+  val server2 = MockWebServer()
+
+  private var eventRecorder = EventRecorder()
 
   private val handshakeCertificates = platform.localhostHandshakeCertificates()
 
@@ -60,31 +64,26 @@ class RouteFailureTest {
   val ipv6 = InetAddress.getByName("2001:db8:ffff:ffff:ffff:ffff:ffff:1")
 
   val refusedStream =
-    MockResponse(
-      socketPolicy = ResetStreamAtStart(ErrorCode.REFUSED_STREAM.httpCode),
-    )
+    MockResponse
+      .Builder()
+      .onRequestStart(CloseStream(ErrorCode.REFUSED_STREAM.httpCode))
+      .build()
   val bodyResponse = MockResponse(body = "body")
 
   @BeforeEach
-  fun setUp(
-    server: MockWebServer,
-    @MockWebServerInstance("server2") server2: MockWebServer,
-  ) {
-    this.server1 = server
-    this.server2 = server2
-
-    socketFactory = SpecificHostSocketFactory(InetSocketAddress(server.hostName, server.port))
+  fun setUp() {
+    socketFactory = SpecificHostSocketFactory(InetSocketAddress(server1.hostName, server1.port))
 
     client =
       clientTestRule
         .newClientBuilder()
         .dns(dns)
         .socketFactory(socketFactory)
-        .eventListenerFactory(clientTestRule.wrap(listener))
+        .eventListenerFactory(clientTestRule.wrap(eventRecorder))
         .build()
   }
 
-  @Test
+  @RepeatedTest(100)
   fun http2OneBadHostOneGoodNoRetryOnConnectionFailure() {
     enableProtocol(Protocol.HTTP_2)
 
@@ -94,8 +93,8 @@ class RouteFailureTest {
     server2.enqueue(bodyResponse)
 
     dns[server1.hostName] = listOf(ipv6, ipv4)
-    socketFactory[ipv6] = server1.inetSocketAddress
-    socketFactory[ipv4] = server2.inetSocketAddress
+    socketFactory[ipv6] = server1.socketAddress
+    socketFactory[ipv4] = server2.socketAddress
 
     client =
       client
@@ -109,6 +108,7 @@ class RouteFailureTest {
       .assertFailureMatches("stream was reset: REFUSED_STREAM")
 
     assertThat(client.routeDatabase.failedRoutes).isEmpty()
+    server1.takeRequest()
     assertThat(server1.requestCount).isEqualTo(1)
     assertThat(server2.requestCount).isEqualTo(0)
 
@@ -131,8 +131,8 @@ class RouteFailureTest {
     server2.enqueue(bodyResponse)
 
     dns[server1.hostName] = listOf(ipv6, ipv4)
-    socketFactory[ipv6] = server1.inetSocketAddress
-    socketFactory[ipv4] = server2.inetSocketAddress
+    socketFactory[ipv6] = server1.socketAddress
+    socketFactory[ipv4] = server2.socketAddress
 
     client =
       client
@@ -164,7 +164,7 @@ class RouteFailureTest {
     )
   }
 
-  @Test
+  @RepeatedTest(100)
   fun http2OneBadHostOneGoodNoRetryOnConnectionFailureFastFallback() {
     enableProtocol(Protocol.HTTP_2)
 
@@ -174,8 +174,8 @@ class RouteFailureTest {
     server2.enqueue(bodyResponse)
 
     dns[server1.hostName] = listOf(ipv6, ipv4)
-    socketFactory[ipv6] = server1.inetSocketAddress
-    socketFactory[ipv4] = server2.inetSocketAddress
+    socketFactory[ipv6] = server1.socketAddress
+    socketFactory[ipv4] = server2.socketAddress
 
     client =
       client
@@ -189,6 +189,7 @@ class RouteFailureTest {
       .assertFailureMatches("stream was reset: REFUSED_STREAM")
 
     assertThat(client.routeDatabase.failedRoutes).isEmpty()
+    server1.takeRequest()
     assertThat(server1.requestCount).isEqualTo(1)
     assertThat(server2.requestCount).isEqualTo(0)
 
@@ -211,8 +212,8 @@ class RouteFailureTest {
     server2.enqueue(bodyResponse)
 
     dns[server1.hostName] = listOf(ipv6, ipv4)
-    socketFactory[ipv6] = server1.inetSocketAddress
-    socketFactory[ipv4] = server2.inetSocketAddress
+    socketFactory[ipv6] = server1.socketAddress
+    socketFactory[ipv4] = server2.socketAddress
 
     client =
       client
@@ -244,7 +245,7 @@ class RouteFailureTest {
     )
   }
 
-  @Test
+  @RepeatedTest(100)
   fun http2OneBadHostRetryOnConnectionFailure() {
     enableProtocol(Protocol.HTTP_2)
 
@@ -254,7 +255,7 @@ class RouteFailureTest {
     server1.enqueue(refusedStream)
 
     dns[server1.hostName] = listOf(ipv6)
-    socketFactory[ipv6] = server1.inetSocketAddress
+    socketFactory[ipv6] = server1.socketAddress
 
     client =
       client
@@ -268,6 +269,7 @@ class RouteFailureTest {
       .assertFailureMatches("stream was reset: REFUSED_STREAM")
 
     assertThat(client.routeDatabase.failedRoutes).isEmpty()
+    server1.takeRequest()
     assertThat(server1.requestCount).isEqualTo(1)
 
     assertThat(clientTestRule.recordedConnectionEventTypes()).containsExactly(
@@ -278,7 +280,7 @@ class RouteFailureTest {
     )
   }
 
-  @Test
+  @RepeatedTest(100)
   fun http2OneBadHostRetryOnConnectionFailureFastFallback() {
     enableProtocol(Protocol.HTTP_2)
 
@@ -288,7 +290,7 @@ class RouteFailureTest {
     server1.enqueue(refusedStream)
 
     dns[server1.hostName] = listOf(ipv6)
-    socketFactory[ipv6] = server1.inetSocketAddress
+    socketFactory[ipv6] = server1.socketAddress
 
     client =
       client
@@ -302,6 +304,7 @@ class RouteFailureTest {
       .assertFailureMatches("stream was reset: REFUSED_STREAM")
 
     assertThat(client.routeDatabase.failedRoutes).isEmpty()
+    server1.takeRequest()
     assertThat(server1.requestCount).isEqualTo(1)
 
     assertThat(clientTestRule.recordedConnectionEventTypes()).containsExactly(
@@ -312,9 +315,8 @@ class RouteFailureTest {
     )
   }
 
-  @ParameterizedTest
-  @ValueSource(booleans = [false, true])
-  fun proxyMoveTest(cleanShutdown: Boolean) {
+  @Test
+  fun proxyMoveTest(cleanClose: Boolean = true) {
     // Define a single Proxy at myproxy:8008 that will artificially move during the test
     val proxySelector = RecordingProxySelector()
     val socketAddress = InetSocketAddress.createUnresolved("myproxy", 8008)
@@ -324,13 +326,13 @@ class RouteFailureTest {
     val proxyServer1 = InetAddress.getByAddress("proxyServer1", byteArrayOf(127, 0, 0, 2))
     val proxyServer2 = InetAddress.getByAddress("proxyServer2", byteArrayOf(127, 0, 0, 3))
 
-    println("Proxy Server 1 is ${server1.inetSocketAddress}")
-    println("Proxy Server 2 is ${server2.inetSocketAddress}")
+    println("Proxy Server 1 is ${server1.socketAddress}")
+    println("Proxy Server 2 is ${server2.socketAddress}")
 
     // Since myproxy:8008 won't resolve, redirect with DNS to proxyServer1
     // Then redirect socket connection to server1
     dns["myproxy"] = listOf(proxyServer1)
-    socketFactory[proxyServer1] = server1.inetSocketAddress
+    socketFactory[proxyServer1] = server1.socketAddress
 
     client = client.newBuilder().proxySelector(proxySelector).build()
 
@@ -340,7 +342,7 @@ class RouteFailureTest {
     server2.enqueue(MockResponse(200))
     server2.enqueue(MockResponse(200))
 
-    println("\n\nRequest to ${server1.inetSocketAddress}")
+    println("\n\nRequest to ${server1.socketAddress}")
     executeSynchronously(request)
       .assertSuccessful()
       .assertCode(200)
@@ -348,21 +350,21 @@ class RouteFailureTest {
     println("server1.requestCount ${server1.requestCount}")
     assertThat(server1.requestCount).isEqualTo(1)
 
-    // Shutdown the proxy server
-    if (cleanShutdown) {
-      server1.shutdown()
+    // Close the proxy server
+    if (cleanClose) {
+      server1.close()
     }
 
     // Now redirect with DNS to proxyServer2
     // Then redirect socket connection to server2
     dns["myproxy"] = listOf(proxyServer2)
-    socketFactory[proxyServer2] = server2.inetSocketAddress
+    socketFactory[proxyServer2] = server2.socketAddress
 
-    println("\n\nRequest to ${server2.inetSocketAddress}")
+    println("\n\nRequest to ${server2.socketAddress}")
     executeSynchronously(request)
       .apply {
         // We may have a single failed request if not clean shutdown
-        if (cleanShutdown) {
+        if (cleanClose) {
           assertSuccessful()
           assertCode(200)
 
@@ -372,7 +374,7 @@ class RouteFailureTest {
         }
       }
 
-    println("\n\nRequest to ${server2.inetSocketAddress}")
+    println("\n\nRequest to ${server2.socketAddress}")
     executeSynchronously(request)
       .assertSuccessful()
       .assertCode(200)

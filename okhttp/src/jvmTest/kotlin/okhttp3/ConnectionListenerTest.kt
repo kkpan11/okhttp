@@ -13,6 +13,12 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+@file:Suppress(
+  "CANNOT_OVERRIDE_INVISIBLE_MEMBER",
+  "INVISIBLE_MEMBER",
+  "INVISIBLE_REFERENCE",
+)
+
 package okhttp3
 
 import assertk.assertThat
@@ -29,7 +35,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.test.assertFailsWith
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
-import mockwebserver3.SocketPolicy.FailHandshake
+import mockwebserver3.junit5.StartStop
 import okhttp3.Headers.Companion.headersOf
 import okhttp3.internal.DoubleInetAddressDns
 import okhttp3.internal.connection.RealConnectionPool.Companion.get
@@ -41,8 +47,6 @@ import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.Timeout
 import org.junit.jupiter.api.extension.RegisterExtension
-import org.junit.jupiter.params.ParameterizedTest
-import org.junit.jupiter.params.provider.ValueSource
 
 @Flaky // STDOUT logging enabled for test
 @Timeout(30)
@@ -53,7 +57,10 @@ open class ConnectionListenerTest {
 
   @RegisterExtension
   val clientTestRule = OkHttpClientTestRule()
-  private var server: MockWebServer? = null
+
+  @StartStop
+  private val server = MockWebServer()
+
   private val listener = RecordingConnectionListener()
   private val handshakeCertificates = localhost()
 
@@ -67,23 +74,21 @@ open class ConnectionListenerTest {
       .build()
 
   @BeforeEach
-  fun setUp(server: MockWebServer?) {
-    this.server = server
+  fun setUp() {
     platform.assumeNotOpenJSSE()
     platform.assumeNotBouncyCastle()
     listener.forbidLock(get(client.connectionPool))
     listener.forbidLock(client.dispatcher)
   }
 
-  @ParameterizedTest
-  @ValueSource(booleans = [true, false])
+  @Test
   fun successfulCallEventSequence() {
-    server!!.enqueue(MockResponse(body = "abc"))
+    server.enqueue(MockResponse(body = "abc"))
     val call =
       client.newCall(
         Request
           .Builder()
-          .url(server!!.url("/"))
+          .url(server.url("/"))
           .build(),
       )
     val response = call.execute()
@@ -100,7 +105,7 @@ open class ConnectionListenerTest {
 
   @Test
   fun failedCallEventSequence() {
-    server!!.enqueue(
+    server.enqueue(
       MockResponse
         .Builder()
         .headersDelay(2, TimeUnit.SECONDS)
@@ -115,7 +120,7 @@ open class ConnectionListenerTest {
       client.newCall(
         Request
           .Builder()
-          .url(server!!.url("/"))
+          .url(server.url("/"))
           .build(),
       )
     assertFailsWith<IOException> {
@@ -139,7 +144,7 @@ open class ConnectionListenerTest {
       client.newCall(
         Request
           .Builder()
-          .url(server!!.url("/"))
+          .url(server.url("/"))
           .build(),
       )
     val response = call.execute()
@@ -158,17 +163,17 @@ open class ConnectionListenerTest {
   @Throws(IOException::class)
   fun secondCallEventSequence() {
     enableTls()
-    server!!.protocols = listOf(Protocol.HTTP_2, Protocol.HTTP_1_1)
-    server!!.enqueue(MockResponse())
-    server!!.enqueue(MockResponse())
+    server.protocols = listOf(Protocol.HTTP_2, Protocol.HTTP_1_1)
+    server.enqueue(MockResponse())
+    server.enqueue(MockResponse())
 
     client
-      .newCall(Request(server!!.url("/")))
+      .newCall(Request(server.url("/")))
       .execute()
       .close()
 
     client
-      .newCall(Request(server!!.url("/")))
+      .newCall(Request(server.url("/")))
       .execute()
       .close()
 
@@ -186,24 +191,24 @@ open class ConnectionListenerTest {
   @Throws(IOException::class)
   fun successfulEmptyH2CallEventSequence() {
     enableTls()
-    server!!.protocols = Arrays.asList(Protocol.HTTP_2, Protocol.HTTP_1_1)
-    server!!.enqueue(MockResponse())
+    server.protocols = Arrays.asList(Protocol.HTTP_2, Protocol.HTTP_1_1)
+    server.enqueue(MockResponse())
     assertSuccessfulEventOrder()
   }
 
   @Test
   @Throws(IOException::class)
   fun multipleDnsLookupsForSingleCall() {
-    server!!.enqueue(
+    server.enqueue(
       MockResponse(
         code = 301,
-        headers = headersOf("Location", "http://www.fakeurl:" + server!!.port),
+        headers = headersOf("Location", "http://www.fakeurl:" + server.port),
       ),
     )
-    server!!.enqueue(MockResponse())
+    server.enqueue(MockResponse())
     val dns = FakeDns()
-    dns["fakeurl"] = client.dns.lookup(server!!.hostName)
-    dns["www.fakeurl"] = client.dns.lookup(server!!.hostName)
+    dns["fakeurl"] = client.dns.lookup(server.hostName)
+    dns["www.fakeurl"] = client.dns.lookup(server.hostName)
     client =
       client
         .newBuilder()
@@ -213,7 +218,7 @@ open class ConnectionListenerTest {
       client.newCall(
         Request
           .Builder()
-          .url("http://fakeurl:" + server!!.port)
+          .url("http://fakeurl:" + server.port)
           .build(),
       )
     val response = call.execute()
@@ -228,19 +233,19 @@ open class ConnectionListenerTest {
   @Test
   @Throws(IOException::class)
   fun successfulConnect() {
-    server!!.enqueue(MockResponse())
+    server.enqueue(MockResponse())
     val call =
       client.newCall(
         Request
           .Builder()
-          .url(server!!.url("/"))
+          .url(server.url("/"))
           .build(),
       )
     val response = call.execute()
     assertThat(response.code).isEqualTo(200)
     response.body.close()
-    val address = client.dns.lookup(server!!.hostName)[0]
-    val expectedAddress = InetSocketAddress(address, server!!.port)
+    val address = client.dns.lookup(server.hostName)[0]
+    val expectedAddress = InetSocketAddress(address, server.port)
     val event = listener.removeUpToEvent(ConnectionEvent.ConnectStart::class.java)
     assertThat(event.route.socketAddress).isEqualTo(expectedAddress)
   }
@@ -249,25 +254,28 @@ open class ConnectionListenerTest {
   @Throws(UnknownHostException::class)
   fun failedConnect() {
     enableTls()
-    server!!.enqueue(MockResponse(socketPolicy = FailHandshake))
+    server.enqueue(MockResponse.Builder().failHandshake().build())
     val call =
       client.newCall(
         Request
           .Builder()
-          .url(server!!.url("/"))
+          .url(server.url("/"))
           .build(),
       )
     assertFailsWith<IOException> {
       call.execute()
     }
-    val address = client.dns.lookup(server!!.hostName)[0]
-    val expectedAddress = InetSocketAddress(address, server!!.port)
+    val address = client.dns.lookup(server.hostName)[0]
+    val expectedAddress = InetSocketAddress(address, server.port)
     val event = listener.removeUpToEvent(ConnectionEvent.ConnectFailed::class.java)
     assertThat(event.route.socketAddress).isEqualTo(expectedAddress)
 
     // Read error: ssl=0x7fd1d8d0fee8: Failure in SSL library, usually a protocol error
     if (!platform.isConscrypt()) {
-      assertThat(event.exception).hasMessage("Unexpected handshake message: client_hello")
+      assertThat(event.exception.message).isIn(
+        "Unexpected handshake message: client_hello",
+        "(unexpected_message) Unexpected handshake message: client_hello",
+      )
     }
   }
 
@@ -275,8 +283,8 @@ open class ConnectionListenerTest {
   @Throws(IOException::class)
   fun multipleConnectsForSingleCall() {
     enableTls()
-    server!!.enqueue(MockResponse(socketPolicy = FailHandshake))
-    server!!.enqueue(MockResponse())
+    server.enqueue(MockResponse.Builder().failHandshake().build())
+    server.enqueue(MockResponse())
     client =
       client
         .newBuilder()
@@ -286,7 +294,7 @@ open class ConnectionListenerTest {
       client.newCall(
         Request
           .Builder()
-          .url(server!!.url("/"))
+          .url(server.url("/"))
           .build(),
       )
     val response = call.execute()
@@ -305,8 +313,8 @@ open class ConnectionListenerTest {
   @Test
   @Throws(IOException::class)
   fun successfulHttpProxyConnect() {
-    server!!.enqueue(MockResponse())
-    val proxy = server!!.toProxyAddress()
+    server.enqueue(MockResponse())
+    val proxy = server.proxyAddress
     client =
       client
         .newBuilder()
@@ -341,7 +349,7 @@ open class ConnectionListenerTest {
           handshakeCertificates.trustManager,
         ).hostnameVerifier(RecordingHostnameVerifier())
         .build()
-    server!!.useHttps(handshakeCertificates.sslSocketFactory())
+    server.useHttps(handshakeCertificates.sslSocketFactory())
   }
 }
 

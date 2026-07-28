@@ -13,7 +13,6 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-@file:Suppress("INVISIBLE_MEMBER", "INVISIBLE_REFERENCE")
 
 package okhttp3.java.net.cookiejar
 
@@ -112,6 +111,9 @@ class JavaNetCookieJar(
       if (value.startsWith("\"") && value.endsWith("\"") && value.length >= 2) {
         value = value.substring(1, value.length - 1)
       }
+
+      // Minimal normalisation so Cookie.Builder doesn't crash on values like "abc123 ".
+      value = value.trim()
 
       result.add(
         Cookie

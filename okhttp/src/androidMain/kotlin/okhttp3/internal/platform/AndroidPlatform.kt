@@ -42,6 +42,7 @@ import okhttp3.internal.platform.android.StandardAndroidSocketAdapter
 import okhttp3.internal.tls.BasicTrustRootIndex
 import okhttp3.internal.tls.CertificateChainCleaner
 import okhttp3.internal.tls.TrustRootIndex
+import okio.ByteString
 
 /** Android 5 to 9 (API 21 to 28). */
 @SuppressSignatureCheck
@@ -93,11 +94,12 @@ class AndroidPlatform :
     sslSocket: SSLSocket,
     hostname: String?,
     protocols: List<@JvmSuppressWildcards Protocol>,
+    echConfigList: ByteString?,
   ) {
     // No TLS extensions if the socket class is custom.
     socketAdapters
       .find { it.matchesSocket(sslSocket) }
-      ?.configureTlsExtensions(sslSocket, hostname, protocols)
+      ?.configureTlsExtensions(sslSocket, hostname, protocols, echConfigList)
   }
 
   override fun getSelectedProtocol(sslSocket: SSLSocket): String? =
@@ -132,8 +134,8 @@ class AndroidPlatform :
     }
 
   override fun getHandshakeServerNames(sslSocket: SSLSocket): List<String> {
-    // The superclass implementation requires APIs not available until API 24+.
-    if (Build.VERSION.SDK_INT < 24) return listOf()
+    // The superclass implementation requires APIs not available until API 25+.
+    if (Build.VERSION.SDK_INT <= 24) return listOf()
     return super.getHandshakeServerNames(sslSocket)
   }
 
@@ -178,19 +180,7 @@ class AndroidPlatform :
   companion object {
     val Tag = "OkHttp"
 
-    val isSupported: Boolean =
-      when {
-        !isAndroid -> false
-        Build.VERSION.SDK_INT >= 30 -> false // graylisted methods are banned
-        else -> {
-          // Fail Fast
-          check(
-            Build.VERSION.SDK_INT >= 21,
-          ) { "Expected Android API level 21+ but was ${Build.VERSION.SDK_INT}" }
-
-          true
-        }
-      }
+    val isSupported: Boolean = isAndroid && Build.VERSION.SDK_INT in 21 until 29
 
     fun buildIfSupported(): Platform? = if (isSupported) AndroidPlatform() else null
   }

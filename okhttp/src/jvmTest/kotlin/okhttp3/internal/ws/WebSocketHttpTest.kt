@@ -43,14 +43,14 @@ import mockwebserver3.Dispatcher
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
 import mockwebserver3.RecordedRequest
-import mockwebserver3.SocketPolicy
-import mockwebserver3.SocketPolicy.KeepOpen
-import mockwebserver3.SocketPolicy.NoResponse
+import mockwebserver3.SocketEffect.CloseSocket
+import mockwebserver3.SocketEffect.Stall
+import mockwebserver3.junit5.StartStop
+import okhttp3.EventRecorder
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
 import okhttp3.OkHttpClientTestRule
 import okhttp3.Protocol
-import okhttp3.RecordingEventListener
 import okhttp3.RecordingHostnameVerifier
 import okhttp3.Request
 import okhttp3.Response
@@ -78,8 +78,8 @@ import org.junit.jupiter.api.extension.RegisterExtension
 @Flaky
 @Tag("Slow")
 class WebSocketHttpTest {
-  // Flaky https://github.com/square/okhttp/issues/4515
-  // Flaky https://github.com/square/okhttp/issues/4953
+  // Flaky https://github.com/lysine-dev/okhttp/issues/4515
+  // Flaky https://github.com/lysine-dev/okhttp/issues/4953
   @RegisterExtension
   var clientTestRule = configureClientTestRule()
 
@@ -88,7 +88,10 @@ class WebSocketHttpTest {
 
   @RegisterExtension
   var testLogHandler = TestLogHandler(OkHttpClient::class.java)
-  private lateinit var webServer: MockWebServer
+
+  @StartStop
+  private val webServer = MockWebServer()
+
   private val handshakeCertificates = platform.localhostHandshakeCertificates()
   private val clientListener = WebSocketRecorder("client")
   private val serverListener = WebSocketRecorder("server")
@@ -114,8 +117,7 @@ class WebSocketHttpTest {
   }
 
   @BeforeEach
-  fun setUp(webServer: MockWebServer) {
-    this.webServer = webServer
+  fun setUp() {
     platform.assumeNotOpenJSSE()
   }
 
@@ -396,7 +398,7 @@ class WebSocketHttpTest {
     webServer.enqueue(
       MockResponse
         .Builder()
-        .socketPolicy(SocketPolicy.DisconnectAtStart)
+        .onRequestStart(CloseSocket())
         .build(),
     )
     val webSocket = newWebSocket()
@@ -424,7 +426,7 @@ class WebSocketHttpTest {
     webServer.enqueue(
       MockResponse
         .Builder()
-        .socketPolicy(SocketPolicy.DisconnectAtStart)
+        .onRequestStart(CloseSocket())
         .build(),
     )
     val webSocket = newWebSocket()
@@ -451,7 +453,7 @@ class WebSocketHttpTest {
     webServer.enqueue(
       MockResponse
         .Builder()
-        .socketPolicy(SocketPolicy.DisconnectAtStart)
+        .onRequestStart(CloseSocket())
         .build(),
     )
     val webSocket = newWebSocket()
@@ -479,7 +481,7 @@ class WebSocketHttpTest {
     webServer.enqueue(
       MockResponse
         .Builder()
-        .socketPolicy(SocketPolicy.DisconnectAtStart)
+        .onRequestStart(CloseSocket())
         .build(),
     )
     val webSocket = newWebSocket()
@@ -506,7 +508,7 @@ class WebSocketHttpTest {
     webServer.enqueue(
       MockResponse
         .Builder()
-        .socketPolicy(SocketPolicy.DisconnectAtStart)
+        .onRequestStart(CloseSocket())
         .build(),
     )
     val webSocket = newWebSocket()
@@ -534,7 +536,7 @@ class WebSocketHttpTest {
     webServer.enqueue(
       MockResponse
         .Builder()
-        .socketPolicy(SocketPolicy.DisconnectAtStart)
+        .onRequestStart(CloseSocket())
         .build(),
     )
     val webSocket = newWebSocket()
@@ -741,7 +743,7 @@ class WebSocketHttpTest {
     webServer.enqueue(
       MockResponse
         .Builder()
-        .socketPolicy(NoResponse)
+        .onResponseStart(Stall)
         .build(),
     )
     val webSocket: WebSocket = newWebSocket()
@@ -766,7 +768,6 @@ class WebSocketHttpTest {
           upgradeResponse(request)
             .body(Buffer().write("81".decodeHex())) // Truncated frame.
             .removeHeader("Content-Length")
-            .socketPolicy(KeepOpen)
             .build()
       }
     val webSocket: WebSocket = newWebSocket()
@@ -906,7 +907,7 @@ class WebSocketHttpTest {
       .isCloseTo(1000.0, 250.0)
   }
 
-  /** https://github.com/square/okhttp/issues/2788  */
+  /** https://github.com/lysine-dev/okhttp/issues/2788  */
   @Test
   fun clientCancelsIfCloseIsNotAcknowledged() {
     webServer.enqueue(
@@ -937,11 +938,11 @@ class WebSocketHttpTest {
 
   @Test
   fun webSocketsDontTriggerEventListener() {
-    val listener = RecordingEventListener()
+    val eventRecorder = EventRecorder()
     client =
       client
         .newBuilder()
-        .eventListenerFactory(clientTestRule.wrap(listener))
+        .eventListenerFactory(clientTestRule.wrap(eventRecorder))
         .build()
     webServer.enqueue(
       MockResponse
@@ -960,7 +961,7 @@ class WebSocketHttpTest {
     clientListener.assertClosing(1000, "")
     clientListener.assertClosed(1000, "")
     serverListener.assertClosed(1000, "")
-    assertThat(listener.recordedEventTypes()).isEmpty()
+    assertThat(eventRecorder.recordedEventTypes()).isEmpty()
   }
 
   @Test
@@ -1009,7 +1010,7 @@ class WebSocketHttpTest {
   /**
    * We had a bug where web socket connections were leaked if the HTTP connection upgrade was not
    * successful. This test confirms that connections are released back to the connection pool!
-   * https://github.com/square/okhttp/issues/4258
+   * https://github.com/lysine-dev/okhttp/issues/4258
    */
   @Test
   @Throws(Exception::class)
@@ -1037,11 +1038,11 @@ class WebSocketHttpTest {
         .build()
     val response = client.newCall(regularRequest).execute()
     response.close()
-    assertThat(webServer.takeRequest().sequenceNumber).isEqualTo(0)
-    assertThat(webServer.takeRequest().sequenceNumber).isEqualTo(1)
+    assertThat(webServer.takeRequest().exchangeIndex).isEqualTo(0)
+    assertThat(webServer.takeRequest().exchangeIndex).isEqualTo(1)
   }
 
-  /** https://github.com/square/okhttp/issues/5705  */
+  /** https://github.com/lysine-dev/okhttp/issues/5705  */
   @Test
   fun closeWithoutSuccessfulConnect() {
     val request =
@@ -1054,7 +1055,7 @@ class WebSocketHttpTest {
     webSocket.close(1000, null)
   }
 
-  /** https://github.com/square/okhttp/issues/7768  */
+  /** https://github.com/lysine-dev/okhttp/issues/7768  */
   @Test
   @Throws(InterruptedException::class)
   fun reconnectingToNonWebSocket() {

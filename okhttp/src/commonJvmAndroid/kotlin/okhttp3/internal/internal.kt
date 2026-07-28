@@ -14,17 +14,17 @@
  * limitations under the License.
  */
 
-/** Exposes Kotlin-internal APIs to Java test code and code in other modules. */
 @file:JvmName("Internal")
 @file:Suppress("ktlint:standard:filename")
 
 package okhttp3.internal
 
+// Exposes Kotlin-internal APIs to Java test code and code in other modules.
+
 import java.nio.charset.Charset
 import javax.net.ssl.SSLSocket
 import okhttp3.Cache
 import okhttp3.CipherSuite
-import okhttp3.ConnectionListener
 import okhttp3.ConnectionPool
 import okhttp3.ConnectionSpec
 import okhttp3.Cookie
@@ -36,7 +36,10 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
 import okhttp3.internal.concurrent.TaskRunner
+import okhttp3.internal.connection.ConnectionListener
 import okhttp3.internal.connection.RealConnection
+
+// Exposes Kotlin-internal APIs to Java test code and code in other modules.
 
 internal fun parseCookie(
   currentTimeMillis: Long,
